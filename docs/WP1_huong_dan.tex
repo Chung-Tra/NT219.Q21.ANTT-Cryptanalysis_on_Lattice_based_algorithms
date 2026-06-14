@@ -1,0 +1,501 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---- Engine: XeLaTeX (Vietnamese via fontspec + DejaVu) ----
+\usepackage{amssymb}
+\usepackage{fontspec}
+\setmainfont{DejaVu Serif}[Scale=0.92]
+\setsansfont{DejaVu Sans}[Scale=0.92]
+\setmonofont{DejaVu Sans Mono}[Scale=0.85]
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{accent}{RGB}{18,82,140}
+\definecolor{accent2}{RGB}{150,45,45}
+\definecolor{codebg}{RGB}{245,246,248}
+\definecolor{rule}{RGB}{18,82,140}
+
+\hypersetup{colorlinks=true,linkcolor=accent,urlcolor=accent}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=leftline, framerule=2.2pt, rulecolor=\color{rule},
+  xleftmargin=12pt, framexleftmargin=12pt,
+  breaklines=true, breakatwhitespace=false,
+  columns=fullflexible, keepspaces=true, showstringspaces=false,
+  aboveskip=7pt, belowskip=7pt
+}
+
+\titleformat{\section}{\Large\bfseries\color{accent}}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{accent2}}{}{0pt}{}
+\titlespacing*{\subsection}{0pt}{8pt}{2pt}
+
+\setlength{\emergencystretch}{3em}
+\setcounter{tocdepth}{1}
+\setlist[itemize]{leftmargin=1.4em,topsep=2pt,itemsep=1pt}
+
+\pagestyle{fancy}\fancyhf{}
+\lhead{\small NT219 — WP1 Dựng môi trường}
+\rhead{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Lead-in label for "what good output looks like" etc.
+\newcommand{\tip}[1]{\par\smallskip\noindent\textcolor{accent}{\textbf{\small$\blacktriangleright$ #1}}\par}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{2.5cm}
+{\Huge\bfseries\color{accent} Dựng môi trường Benchmark PQC\par}
+\vspace{0.6cm}
+{\Large WP1 — Giải thích 12 file, theo từng file\par}
+\vspace{0.3cm}
+{\large trên \textbf{x86\_64} và \textbf{ARM — Raspberry Pi 4 (Mythic Beasts)}\par}
+\vspace{1.2cm}
+{\large Đồ án NT219 · So sánh ML-KEM / ML-DSA với RSA / ECC\par}
+\vspace{0.2cm}
+{\normalsize (Kyber, Dilithium) — Linux x86\_64 và ARM aarch64\par}
+\vfill
+{\small Tài liệu nội bộ cho nhóm. Dùng kèm mã nguồn trong repo.\par}
+\vspace{0.5cm}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section{Tổng quan: vì sao có 12 file và hai máy}
+
+WP1 là bước \emph{dựng môi trường} — biến một máy Linux trắng thành nơi chạy được ML-KEM/ML-DSA và đo đạc chúng. Toàn bộ công việc gói trong 12 file. Điểm cốt lõi phải nắm trước khi đọc chi tiết: \textbf{x86\_64 và ARM không phải ``một việc làm hai lần'' mà là hai thí nghiệm khác nhau}.
+
+\begin{itemize}
+  \item \textbf{Máy x86\_64} (laptop) trả lời \textbf{RQ1}: PQC tốn kém thế nào so với RSA/ECC trên một server điển hình. Đây cũng là nơi phát triển, gỡ lỗi, và là nơi \emph{duy nhất} chạy được nhóm file bằng-chứng cross-compile/Docker.
+  \item \textbf{Máy ARM — Raspberry Pi 4} trả lời \textbf{RQ2}: tối ưu NEON có kéo PQC về mức khả thi trên thiết bị nhúng không. Pi 4 dùng CPU \textbf{Cortex-A72} (SoC BCM2711), 4 nhân 1.5\,GHz, ARMv8-A 64-bit.
+\end{itemize}
+
+\textbf{Ba nguyên tắc vàng} xuyên suốt tài liệu:
+
+\begin{enumerate}[leftmargin=1.6em,topsep=2pt]
+  \item \textbf{Binary là tài sản theo máy.} Mọi thứ trong \verb|~/pqc| build trên máy nào chỉ chạy trên máy đó; bản tối ưu còn gắn chặt với đúng con CPU đã build ra nó. Không bao giờ copy \verb|~/pqc| chéo máy.
+  \item \textbf{Số đo là tài sản theo máy.} Chỉ so trực tiếp hai số đo \emph{cùng một máy}. Muốn so giữa hai máy thì so \emph{tỉ lệ} (xem mục \ref{sec:fournum}), không so số thô.
+  \item \textbf{Một bộ script cho cả hai máy.} Không có ``bản script cho ARM'' riêng. Cùng repo, cùng lệnh; script tự nhận diện kiến trúc qua \verb|uname -m| và tự đổi cờ. Khác biệt nằm ở \emph{kịch bản vận hành}, là thứ tài liệu này mô tả.
+\end{enumerate}
+
+\tip{Cách đọc} Mỗi file ở các mục sau đều có cùng năm phần: \emph{Nhiệm vụ} (làm gì trong đồ án) — \emph{Sinh ra gì \& ở đâu} (tạo ra file nào, đặt đâu) — \emph{Trên x86\_64} — \emph{Trên ARM Pi 4} — \emph{Lưu ý}. File nào hai máy giống nhau sẽ gộp thành một phần ``Trên cả hai máy'' để khỏi dài dòng.
+
+% =====================================================================
+\section{Bản đồ: file nào sinh ra gì, đặt ở đâu}
+
+Mọi thứ cài vào \verb|~/pqc| (\textbf{không} đụng OpenSSL hệ thống). Sau khi chạy đủ, cây thư mục như sau:
+
+\begin{lstlisting}
+~/pqc/
+|-- openssl/                 <- build_openssl.sh      (OpenSSL 3.6.2 + PQC native)
+|-- liboqs-ref/              <- build_liboqs.sh ref   (C thuan, NEON OFF)
+|-- liboqs-neon/             <- build_liboqs.sh opt   (toi uu: NEON/AVX2 ON)
+|-- liboqs-aarch64-cross/    <- cross_build_liboqs.sh (CHI tren x86; bang chung)
+|-- oqs-provider/            <- build_oqsprovider.sh  (provider cho TLS)
+`-- src/                     <- nguon da clone (tai dung, khong build lai)
+    |-- openssl/
+    |-- liboqs/
+    |   |-- build-ref/tests/speed_kem, speed_sig
+    |   `-- build-opt/tests/speed_kem, speed_sig
+    |-- PQClean/crypto_kem|crypto_sign/<scheme>/<variant>/lib*.a
+    `-- oqs-provider/
+\end{lstlisting}
+
+Đồng thời, bằng chứng tái lập tự gom vào \verb|docs/| trong repo:
+
+\begin{lstlisting}
+<repo>/docs/
+|-- openssl.commit  liboqs.commit  pqclean.commit  oqsprovider.commit
+|-- env_report_x86_64.txt          <- verify_env.sh tren may x86
+`-- env_report_aarch64.txt         <- verify_env.sh tren may ARM
+\end{lstlisting}
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+\textbf{File} & \textbf{Sinh ra} & \textbf{Ở đâu} \\
+\midrule
+versions.env & (không) & file đầu vào, được \texttt{source} \\
+setenv.sh & biến môi trường & chỉ trong shell hiện tại \\
+install\_prereqs.sh & gói hệ thống & \texttt{/usr} \\
+build\_openssl.sh & OpenSSL + commit & \texttt{\textasciitilde/pqc/openssl}, \texttt{docs/openssl.commit} \\
+build\_liboqs.sh & 2 thư viện + tools & \texttt{\textasciitilde/pqc/liboqs-\{ref,neon\}}, \texttt{docs/liboqs.commit} \\
+fetch\_pqclean.sh & các file \texttt{.a} & \texttt{\textasciitilde/pqc/src/PQClean/.../lib*.a}, \texttt{docs/pqclean.commit} \\
+build\_oqsprovider.sh & provider \texttt{.so} & \texttt{\textasciitilde/pqc/oqs-provider/lib}, \texttt{docs/oqsprovider.commit} \\
+cross\_build\_liboqs.sh & binary ARM (cross) & \texttt{\textasciitilde/pqc/liboqs-aarch64-cross} \\
+aarch64-toolchain.cmake & (không) & file cấu hình cho cross \\
+docker\_buildx.sh & image đa kiến trúc & trong Docker \\
+Dockerfile.x86\_64 & image x86 & trong Docker \\
+verify\_env.sh & biên bản môi trường & \texttt{docs/env\_report\_<arch>.txt} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% =====================================================================
+\section{\texttt{versions.env} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Nguồn-sự-thật-duy-nhất của cả dự án: ghim phiên bản (\verb|OPENSSL_TAG=openssl-3.6.2|, \verb|LIBOQS_TAG=0.14.0|, \verb|OQSPROVIDER_TAG=0.10.0|) và mọi đường dẫn dưới \verb|~/pqc|. Mọi script khác đọc các biến này thay vì tự định nghĩa, nên đổi một phiên bản chỉ sửa một chỗ — đây là điểm chấm \emph{Reproducibility} của đề bài.
+
+\subsection*{Sinh ra gì \& ở đâu}
+Không sinh ra gì. Nó là \emph{đầu vào}, được các script nạp bằng \verb|source|.
+
+\subsection*{Trên cả hai máy}
+Giống hệt nhau — chỉ cần clone repo về là có. Không chạy trực tiếp.
+
+\subsection*{Lưu ý}
+Muốn kiểm một biến có còn ai dùng không (trước khi xóa): \verb|grep -rl '$VAR' --include='*.sh' .| — nếu ra 0 file thì đó là cấu hình chết, bỏ được.
+
+% =====================================================================
+\section{\texttt{setenv.sh} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Bật OpenSSL tự build cho \emph{terminal hiện tại}: thêm \verb|~/pqc/openssl/bin| vào \verb|PATH| và thư mục thư viện vào \verb|LD_LIBRARY_PATH|. Cách này theo đúng quy ước demo chính thức của OpenSSL: link động, \emph{không} nhúng rpath, tìm thư viện lúc chạy qua \verb|LD_LIBRARY_PATH|.
+
+\subsection*{Sinh ra gì \& ở đâu}
+Chỉ sinh ra biến môi trường, sống trong shell hiện tại, không tạo file.
+
+\subsection*{Trên cả hai máy}
+Giống hệt. Phải dùng \verb|source scripts/setenv.sh| — \textbf{không} chạy \verb|./setenv.sh|.
+
+\subsection*{Lưu ý}
+Đây là lỗi phổ biến nhất của người mới: chạy \verb|./setenv.sh| thì biến môi trường sống trong tiến trình con rồi biến mất; phải \verb|source| để biến vào chính shell đang dùng. Kiểm: sau khi source, \verb|which openssl| phải ra \verb|~/pqc/openssl/bin/openssl|. Mỗi cửa sổ terminal mới đều phải source lại.
+
+% =====================================================================
+\section{\texttt{install\_prereqs.sh} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Cài toàn bộ công cụ: trình biên dịch (gcc, g++, cmake, ninja, perl, git), công cụ đo (\verb|/usr/bin/time|, htop, apache2-utils cho \verb|ab|, wrk, tshark, perf), và thư viện phân tích (pandas, matplotlib). \textbf{Đây là script duy nhất cần \texttt{sudo}.}
+
+\subsection*{Sinh ra gì \& ở đâu}
+Cài gói hệ thống vào \verb|/usr|. Không tạo file trong repo.
+
+\subsection*{Trên x86\_64}
+Chạy thẳng: \verb|bash scripts/install_prereqs.sh|. Giữa chừng hộp thoại cấu hình \verb|wireshark-common| hiện ra hỏi cho phép user thường bắt gói tin — \textbf{chọn Yes} rồi Enter. Để quyền đó áp vào tài khoản, sau khi script xong chạy \verb|sudo usermod -aG wireshark $USER| rồi đăng xuất/đăng nhập lại.
+
+\subsection*{Trên ARM Pi 4 (Mythic Beasts)}
+Lệnh y hệt; apt tự kéo các gói bản \verb|arm64|. Dòng \verb|linux-tools-$(uname -r)| trong script phát huy tác dụng ở đây: kernel của Pi/cloud có hậu tố riêng, lấy đúng \verb|uname -r| mới cài được \verb|perf| khớp kernel (gói \verb|linux-tools-generic| dễ lệch).
+
+\subsection*{Lưu ý}
+\verb|DEBIAN_FRONTEND=noninteractive| trong script \emph{không} lọt qua \verb|sudo| (sudo reset môi trường), nên hộp thoại tshark vẫn hiện — đây là chủ ý: một quyết định bảo mật nên được chọn có ý thức một lần. Tư cách thành viên nhóm \verb|wireshark| chỉ được nạp khi đăng nhập lại (hoặc \verb|newgrp wireshark|).
+
+% =====================================================================
+\section{\texttt{build\_openssl.sh} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Build OpenSSL 3.6.2 có sẵn ML-KEM/ML-DSA ngay trong \verb|libcrypto| (PQC ``native''). Đây là \textbf{nền của WP2, WP4, WP5} — mọi phép đo bằng \verb|bench_evp| và mọi thí nghiệm TLS đều dựa vào bản OpenSSL này.
+
+\subsection*{Sinh ra gì \& ở đâu}
+\begin{itemize}
+  \item Cài đặt: \verb|~/pqc/openssl/| (có \verb|bin/openssl|, \verb|include/|, \verb|lib| hoặc \verb|lib64|).
+  \item Nguồn: \verb|~/pqc/src/openssl/| (giữ lại để tái dùng).
+  \item Bằng chứng: \verb|docs/openssl.commit| (commit chính xác đã build).
+\end{itemize}
+
+\subsection*{Trên x86\_64}
+\begin{lstlisting}
+bash scripts/build_openssl.sh
+\end{lstlisting}
+Clone tag 3.6.2 (~1 phút), Configure, \verb|make| khoảng 15–30 phút, rồi test suite. Nên chạy đủ test \textbf{một lần} để lấy bằng chứng; các lần rebuild sau dùng \verb|SKIP_TESTS=1|. Kết thúc phải thấy dòng \verb|DONE| và \verb|openssl version| in \verb|3.6.2|.
+
+\subsection*{Trên ARM Pi 4 (Mythic Beasts)}
+Cùng lệnh, nhưng Pi 4 (4 nhân Cortex-A72, đọc/ghi thẻ microSD chậm) build \textbf{lâu hơn nhiều} — \verb|make| có thể 30–60+ phút. Chiến thuật:
+\begin{lstlisting}
+SKIP_TESTS=1 bash scripts/build_openssl.sh    # ban ngay: nhanh, de lam viec tiep
+# chay rieng MOT lan qua dem de co bang chung test pass:
+FORCE=1 bash scripts/build_openssl.sh
+\end{lstlisting}
+\textbf{Cảnh báo mạng IPv6-only:} Pi tại Mythic Beasts chỉ có IPv6, trong khi GitHub chưa hỗ trợ IPv6 — lưu lượng đi ra qua NAT64/DNS64 của nhà cung cấp. Nếu \verb|git clone| treo, kiểm tra cấu hình DNS64 theo tài liệu của họ.
+
+\subsection*{Lưu ý}
+Kiểm tay PQC: \verb!~/pqc/openssl/bin/openssl list -kem-algorithms | grep ML-KEM!. Chạy lại thấy ``already installed … Skipping'' là \emph{đúng thiết kế} (idempotency), muốn build lại thật thì \verb|FORCE=1|.
+
+% =====================================================================
+\section{\texttt{build\_liboqs.sh ref|opt} — \textmd{\normalsize scripts/}}
+\label{sec:liboqs}
+
+\subsection*{Nhiệm vụ}
+Build liboqs thành \textbf{hai cây} với \verb|OQS_DIST_BUILD=OFF| (``for use on a single machine''): cây \verb|ref| (C thuần) và cây \verb|opt| (bật tối ưu vi kiến trúc). \textbf{Đây là trái tim của WP3} — so hai cây trên cùng máy chính là đo ``hiệu ứng tối ưu''.
+
+\subsection*{Sinh ra gì \& ở đâu}
+\begin{itemize}
+  \item \verb|~/pqc/liboqs-ref/| hoặc \verb|~/pqc/liboqs-neon/| (tùy tham số).
+  \item Công cụ đo tốc độ: \verb|~/pqc/src/liboqs/build-<variant>/tests/speed_kem| và \verb|speed_sig|.
+  \item \verb|docs/liboqs.commit|.
+\end{itemize}
+
+\subsection*{Trên x86\_64}
+\begin{lstlisting}
+bash scripts/build_liboqs.sh ref     # du de nghiem thu chuoi liboqs
+bash scripts/build_liboqs.sh opt     # TUY CHON: du lieu phu "hieu ung AVX2"
+\end{lstlisting}
+Trên x86, ``opt'' nghĩa là \verb|-march=native| + tự dò bật \textbf{AVX2}/AES-NI. Chạy \verb|speed_kem ML-KEM-768| đọc header:
+\begin{itemize}
+  \item cây \verb|ref|: \verb|CPU exts: SSE SSE2|, \verb|AES: OpenSSL|, \verb|OQS_OPT_TARGET=generic|;
+  \item cây \verb|opt|: thêm \verb|-march=native|, \verb|CPU exts: AVX2 ...|, \verb|AES: NI|, \verb|OQS_OPT_TARGET=auto|.
+\end{itemize}
+
+\tip{Số mẫu thật đã đo (LOQ, ML-KEM-768) — để biết ``đúng'' trông thế nào}
+\begin{center}\small
+\begin{tabular}{lrrr}
+\toprule
+Op & ref (µs) & opt (µs) & Speedup \\
+\midrule
+keygen & 30.985 & 10.705 & ×2.89 \\
+encaps & 30.963 & 11.255 & ×2.75 \\
+decaps & 36.250 & 13.718 & ×2.64 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Gọi đúng tên: ×2.6–2.9 là ``hiệu ứng tối ưu x86 trọn gói'' (AVX2 đóng vai chính, kèm AES-NI), \emph{không} viết ``AVX2 nhanh ×2.9''.
+
+\subsection*{Trên ARM Pi 4 (Mythic Beasts)}
+\textbf{Bắt buộc CẢ HAI cây} — đây mới là thí nghiệm NEON (RQ2):
+\begin{lstlisting}
+bash scripts/build_liboqs.sh ref     # BAT BUOC
+bash scripts/build_liboqs.sh opt     # BAT BUOC
+\end{lstlisting}
+Khác x86: ở đây ``opt'' nghĩa là bật \textbf{NEON} (\verb|-DOQS_USE_ARM_NEON_INSTRUCTIONS=ON|) + \verb|-mcpu=native|; cây \verb|ref| nhận \verb|NEON=OFF| tường minh (khối \verb|uname -m| của script lần đầu thức dậy — trên x86 khối này im lặng). Đọc log cmake của cây ref phải thấy dòng \verb|...NEON_INSTRUCTIONS=OFF| để tự xác nhận cây ref ``sạch'' NEON.
+
+\tip{Điểm phương pháp luận đặc biệt của Pi 4}
+Cortex-A72/BCM2711 \textbf{KHÔNG có ARM Crypto Extensions} (Broadcom không mua license) — nên AES/SHA2 phần cứng vắng mặt, các cờ đó tự-dò sẽ OFF ở \emph{cả hai} cây. Hệ quả tốt: cặp ref/opt càng ``sạch'', chênh lệch đúng bằng NEON. (Trên Ampere/Graviton thì AES/SHA2 bật đều ở hai cây, delta vẫn chỉ là NEON.)
+
+\subsection*{Lưu ý}
+\begin{itemize}
+  \item \textbf{PMU (đếm chu kỳ) trên Pi:} ARM không có \verb|rdtsc|; muốn cycles chính xác cần nạp kernel module \emph{trước} (clone \verb|mupq/pqax|, vào \verb|enable_ccr|, \verb|make install| — cần sudo + linux headers) \emph{rồi mới} build lại với \texttt{USE\_ARM\_PMU=1 FORCE=1}. Pi 4 là bare-metal nên làm được; nếu không, bỏ PMU, dùng wall-clock và ghi một dòng Limitations.
+  \item \textbf{Throttling nhiệt:} Pi 4 giảm xung khi nóng (~80–85°C). Giữa các batch đo phải để nguội; theo dõi bằng \verb|vcgencmd measure_temp| (Pi OS) hoặc \verb|/sys/class/thermal|.
+  \item \verb|generic| đổi nghĩa theo máy: x86 → \verb|-march=x86-64|; ARM64 → \verb|-mcpu=cortex-a53|. Nên ``ref-x86'' và ``ref-ARM'' là hai baseline khác nhau — cấm so chéo số thô.
+\end{itemize}
+
+% =====================================================================
+\section{\texttt{fetch\_pqclean.sh [clean|avx2|aarch64]} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Clone PQClean và build thư viện \verb|.a| \textbf{tách riêng từng thuật toán}. Ba việc cho đồ án: (1) checkbox ``reference implementations'' của đề bài; (2) đo \emph{code size từng thuật toán} cho WP5 — việc mà \verb|libcrypto.so|/\verb|liboqs.so| gộp không làm được; (3) trục đối chứng NEON thứ hai cho WP3.
+
+\subsection*{Sinh ra gì \& ở đâu}
+\begin{itemize}
+  \item \verb!~/pqc/src/PQClean/crypto_kem|crypto_sign/<scheme>/<variant>/lib*.a! (6 scheme: ml-kem-512/768/1024, ml-dsa-44/65/87).
+  \item \verb|docs/pqclean.commit|.
+\end{itemize}
+
+\subsection*{Trên x86\_64}
+\begin{lstlisting}
+bash scripts/fetch_pqclean.sh clean      # ban portable C (moi may)
+bash scripts/fetch_pqclean.sh avx2       # tuy chon: ban toi uu x86
+\end{lstlisting}
+Đo: \verb|size ~/pqc/src/PQClean/crypto_kem/ml-kem-768/{clean,avx2}/lib*.a|. Bản avx2 thường \emph{to hơn} clean — đó là ``cái giá bộ nhớ của tốc độ'', một nhận định ăn điểm Analysis.
+
+\subsection*{Trên ARM Pi 4 (Mythic Beasts)}
+\begin{lstlisting}
+bash scripts/fetch_pqclean.sh clean
+bash scripts/fetch_pqclean.sh aarch64    # ban NEON: assembly viet tay
+\end{lstlisting}
+Cặp \verb|clean| vs \verb|aarch64| trên cùng Pi là trục NEON độc lập với liboqs. Bản \verb|aarch64| của PQClean dùng \textbf{assembly NEON viết tay} (các file \verb|neon_*.o|, \verb|__asm_NTT.o|) — chi tiết đẹp để trích vào báo cáo.
+
+\subsection*{Lưu ý}
+Script có \textbf{cổng chặn sai kiến trúc}: gõ \verb|aarch64| trên x86 (hoặc \verb|avx2| trên ARM) sẽ bị chặn ngay với một dòng lỗi rõ ràng — thấy lỗi đó là \emph{đúng}, không phải hỏng. PQClean sắp được archive read-only (7/2026), kế nhiệm là PQ Code Package — ghi một câu vào phần Literature Review.
+
+% =====================================================================
+\section{\texttt{build\_oqsprovider.sh [ref|opt]} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Build OQS Provider — kế nhiệm \emph{chính thức} của fork ``OQS-OpenSSL'' mà đề bài nêu (fork đó đã ngừng phát triển). Provider này cắm thuật toán PQC vào OpenSSL cho nhánh thí nghiệm TLS-qua-liboqs.
+
+\subsection*{Sinh ra gì \& ở đâu}
+\verb|~/pqc/oqs-provider/lib/oqsprovider.so| và \verb|docs/oqsprovider.commit|.
+
+\subsection*{Trên cả hai máy}
+\begin{lstlisting}
+bash scripts/build_oqsprovider.sh opt    # link voi cay liboqs-neon (mac dinh)
+bash scripts/build_oqsprovider.sh ref    # hoac link voi cay liboqs-ref
+\end{lstlisting}
+\textbf{Điều kiện trước (hai cổng gác):} phải có OpenSSL \emph{và} liboqs \emph{đúng variant} bạn yêu cầu. Trên ARM, muốn provider-NEON thì phải build \verb|liboqs opt| trước. Kiểm bằng:
+\begin{lstlisting}
+openssl list -providers -provider-path ~/pqc/oqs-provider/lib -provider oqsprovider
+\end{lstlisting}
+phải thấy \verb|oqsprovider| trong danh sách.
+
+\subsection*{Lưu ý}
+Chỉ cần khi làm nhánh TLS bằng cây liboqs. WP2/WP4 với OpenSSL native \textbf{không} cần file này — chưa tới lúc đó thì chưa phải chạy.
+
+% =====================================================================
+\section{\texttt{cross\_build\_liboqs.sh} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Cross-compile liboqs cho aarch64 \emph{ngay trên PC x86} — bằng chứng đáp ứng vế ``separate cross-compile scripts'' của đề bài. Binary này \textbf{KHÔNG dùng để đo}.
+
+\subsection*{Sinh ra gì \& ở đâu}
+\verb|~/pqc/liboqs-aarch64-cross/| (chứa \verb|.so| là mã ARM generic).
+
+\subsection*{Trên x86\_64}
+\begin{lstlisting}
+sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu   # mot lan
+bash scripts/cross_build_liboqs.sh
+\end{lstlisting}
+Kiểm: dòng cuối \verb|file .../liboqs.so| phải in ``ARM aarch64''. Đây là phép ``thợ may đo ni cho người vắng mặt'': compiler x86 tạo ra mã ARM nhưng không chạy thử tại chỗ được.
+
+\subsection*{Trên ARM Pi 4}
+Không dùng — đã đứng trên máy ARM thật thì build native (mục \ref{sec:liboqs}) vừa đúng vừa cho số đo thật.
+
+\subsection*{Lưu ý}
+Vai trò chỉ là \emph{Build \& Reproducibility}. Tuyệt đối không lấy binary cross này ra đo rồi đưa số vào báo cáo.
+
+% =====================================================================
+\section{\texttt{aarch64-toolchain.cmake} — \textmd{\normalsize cmake/}}
+
+\subsection*{Nhiệm vụ}
+Định nghĩa ``toolchain'' để CMake biết cross-compile x86$\to$aarch64: đặt \verb|CMAKE_SYSTEM_NAME|, \verb|SYSTEM_PROCESSOR aarch64|, trỏ \verb|CMAKE_C_COMPILER| tới \verb|aarch64-linux-gnu-gcc|, và bộ bốn \verb|FIND_ROOT_PATH_MODE_*|. Đồng mẫu với file \verb|toolchain_rasppi.cmake| mà liboqs ship.
+
+\subsection*{Sinh ra gì \& ở đâu}
+Không sinh ra gì. Là file cấu hình.
+
+\subsection*{Trên cả hai máy}
+Không bao giờ chạy trực tiếp — nó được \verb|cross_build_liboqs.sh| nạp qua \verb|-DCMAKE_TOOLCHAIN_FILE|. Chỉ có ý nghĩa trên x86 (đầu vào cho cross). Kiểm cú pháp: \verb|cmake -P cmake/aarch64-toolchain.cmake| chạy im lặng là OK.
+
+% =====================================================================
+\section{\texttt{docker\_buildx.sh} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Đóng hộp môi trường cho \textbf{cả hai kiến trúc cùng lúc}, đứng trên máy x86: \verb|buildx| chạy cùng một Dockerfile hai lần — lần amd64 build thường, lần arm64 build trong \textbf{QEMU} (phần mềm giả lập CPU ARM). Bằng chứng vế ``buildx multiarch'' của đề bài.
+
+\subsection*{Sinh ra gì \& ở đâu}
+Image \verb|nt219-pqc:multi| (hai-trong-một) trong Docker.
+
+\subsection*{Trên x86\_64}
+\begin{lstlisting}
+docker run --privileged --rm tonistiigi/binfmt --install all   # cai QEMU, mot lan
+bash scripts/docker_buildx.sh
+\end{lstlisting}
+
+\subsection*{Trên ARM Pi 4}
+Không cần — image bản arm64 đã được sinh sẵn từ x86 qua buildx; nếu cần môi trường đóng hộp trên Pi thì chỉ việc \verb|docker run| image đó.
+
+\subsection*{Lưu ý}
+\textbf{Cấm đo trong QEMU.} Số đo bên trong container arm64 chạy trên PC là tốc độ của \emph{trình giả lập}, không phải của Cortex-A72 — vô nghĩa khoa học. Caveat kỹ thuật: cờ \verb|--load| có thể từ chối image đa-platform (``does not support manifest lists''); khi đó bật containerd image store hoặc build tách từng \verb|--platform|.
+
+% =====================================================================
+\section{\texttt{Dockerfile.x86\_64} — \textmd{\normalsize docker/}}
+
+\subsection*{Nhiệm vụ}
+Mô tả môi trường đóng hộp — yêu cầu \emph{nguyên văn} của đề bài (``Provide Dockerfile for x86\_64''). Điểm hay: thay vì chép lại lệnh build, nó \textbf{tái dùng chính các script của repo} (\verb|build_openssl.sh|, \verb|make|, \verb|verify_env.sh|) — một nguồn sự thật; cổng \verb|verify_env| ở cuối làm image \emph{tự fail} nếu môi trường hỏng.
+
+\subsection*{Sinh ra gì \& ở đâu}
+Image \verb|nt219-pqc| trong Docker.
+
+\subsection*{Trên x86\_64}
+\begin{lstlisting}
+docker build -f docker/Dockerfile.x86_64 -t nt219-pqc .   # chay tu GOC repo
+docker run -it --rm nt219-pqc
+\end{lstlisting}
+Trong container, \verb|openssl version| phải ra \verb|3.6.2|.
+
+\subsection*{Trên ARM Pi 4}
+Bản ARM của image đến từ \verb|docker_buildx.sh| (qua QEMU), không build riêng trên Pi.
+
+\subsection*{Lưu ý}
+Phải chạy \verb|docker build| từ \textbf{gốc repo} (để context \verb|.| nhìn thấy \verb|scripts/| và \verb|src/| mà COPY). Pin phiên bản qua biến + bỏ test suite trong CI giống quy ước của oqs-demos.
+
+% =====================================================================
+\section{\texttt{verify\_env.sh} — \textmd{\normalsize scripts/}}
+
+\subsection*{Nhiệm vụ}
+Hai vai: (1) \emph{cổng chống crypto-failure} — chặn lại nếu OpenSSL đang dùng thiếu ML-KEM/ML-DSA; (2) \emph{biên bản môi trường} — ghi gcc, cờ build, CPU governor. Trả lời trực tiếp câu ``Document compiler versions, flags, and CPU governor settings'' của đề bài.
+
+\subsection*{Sinh ra gì \& ở đâu}
+\verb|docs/env_report_<arch>.txt| (tên file tự gắn kiến trúc).
+
+\subsection*{Trên x86\_64}
+\verb|bash scripts/verify_env.sh| $\to$ \verb|docs/env_report_x86_64.txt|. Thấy \verb|PASS. Report written to ...| là đạt.
+
+\subsection*{Trên ARM Pi 4 (Mythic Beasts)}
+Cùng lệnh $\to$ \verb|docs/env_report_aarch64.txt|. \textbf{Phải chạy trên cả hai máy} để nộp kèm hai biên bản. Governor trên Pi mặc định \verb|ondemand| (dao động xung) — trước khi đo nên đặt \verb|performance|:
+\begin{lstlisting}
+sudo cpupower frequency-set -g performance
+# neu thieu cpupower:
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+\end{lstlisting}
+
+\subsection*{Lưu ý}
+Cần OpenSSL đã build trước (thiếu thì chính nó là cái fail đầu tiên, kèm chỉ dẫn). Chạy lại sau mỗi lần đổi môi trường để biên bản tự cập nhật.
+
+% =====================================================================
+\section{Hồ sơ tái lập (thư mục \texttt{docs/})}
+
+Sáu mảnh bằng chứng tự sinh khi chạy, nộp kèm báo cáo: bốn file \verb|*.commit| (commit chính xác của OpenSSL/liboqs/PQClean/oqs-provider) cộng hai \verb|env_report_<arch>.txt| (compiler, cờ, governor của từng máy). Không phải gõ tay — chúng xuất hiện như sản phẩm phụ của quá trình build, đúng tinh thần ``ai cũng dựng lại được y hệt''.
+
+% =====================================================================
+\section{Quy tắc bốn con số khi so sánh}
+\label{sec:fournum}
+
+Sau hai máy, riêng liboqs ML-KEM-768 bạn có bốn số. Dùng chúng cho đúng:
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l c X@{}}
+\toprule
+\textbf{Phép so} & \textbf{Hợp lệ?} & \textbf{Trả lời câu gì} \\
+\midrule
+ref-x86 $\leftrightarrow$ opt-x86 (cùng máy) & Có & hiệu ứng AVX2/tối ưu x86 (đã đo ×2.6–2.9) \\
+ref-ARM $\leftrightarrow$ opt-ARM (cùng máy) & Có & \textbf{hiệu ứng NEON — chính là RQ2} \\
+opt-x86 $\leftrightarrow$ opt-ARM (số thô) & Không & đổi 2 biến cùng lúc (CPU + loại tối ưu) \\
+(opt/ref)$_{x86}$ $\leftrightarrow$ (opt/ref)$_{ARM}$ & Có & ``tối ưu đáng giá ×A trên server, ×B trên Pi'' \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Cách ``bắc cầu'' giữa hai máy là so \emph{tỉ lệ} (đại lượng không thứ nguyên, đã tự chuẩn hóa theo máy), không bao giờ so số thô. Cùng logic áp cho \verb|bench_evp| (RQ1): PQC-vs-RSA so trong từng máy, chéo máy chỉ so \emph{tỉ số} PQC/RSA.
+
+% =====================================================================
+\section{Phụ lục — Trình tự chạy đầy đủ, hai máy}
+
+\subsection*{Trên PC x86\_64}
+\begin{lstlisting}
+cd <repo> && chmod +x scripts/*.sh
+bash scripts/install_prereqs.sh        # 1) toolchain + cong cu do (sudo)
+bash scripts/build_openssl.sh          # 2) OpenSSL 3.6.2 PQC native
+source scripts/setenv.sh               # 3) bat moi truong (MOI terminal)
+bash scripts/verify_env.sh             # 4) cong gac + bien ban
+make                                   # 5) build bench_evp (WP2)
+bash scripts/build_liboqs.sh ref       # 6) liboqs ref (nghiem thu)
+bash scripts/fetch_pqclean.sh clean    # 7) PQClean (WP5 code-size)
+# Tuy chon: build_liboqs.sh opt | fetch_pqclean.sh avx2
+# Bang chung §7.3 (chi x86): cross_build_liboqs.sh | docker build ...
+\end{lstlisting}
+
+\subsection*{Trên ARM — Raspberry Pi 4 (Mythic Beasts)}
+\begin{lstlisting}
+git clone <repo> && cd <repo> && chmod +x scripts/*.sh
+bash scripts/install_prereqs.sh
+SKIP_TESTS=1 bash scripts/build_openssl.sh   # Pi build cham; full test qua dem 1 lan
+source scripts/setenv.sh
+bash scripts/verify_env.sh             # -> docs/env_report_aarch64.txt
+sudo cpupower frequency-set -g performance   # co dinh xung truoc khi do
+make
+bash scripts/build_liboqs.sh ref       # BAT BUOC ca hai cay = thi nghiem NEON
+bash scripts/build_liboqs.sh opt
+bash scripts/fetch_pqclean.sh clean
+bash scripts/fetch_pqclean.sh aarch64
+# Luu y Pi 4: nhiet do (de nguoi giua cac batch), PMU can module pqax,
+# mang IPv6-only (clone qua NAT64), PUSH du lieu truoc khi tra may.
+\end{lstlisting}
+
+\vfill
+\begin{center}\small\itshape
+Mọi binary trong \texttt{\textasciitilde/pqc} build trên máy nào chỉ dùng trên máy đó.\\
+Số đo là tài sản theo máy — so trực tiếp trong cùng máy, bắc cầu giữa máy bằng tỉ lệ.
+\end{center}
+
+\end{document}

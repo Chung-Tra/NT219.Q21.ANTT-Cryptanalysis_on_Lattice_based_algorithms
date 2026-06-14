@@ -1,0 +1,538 @@
+\documentclass[11pt,a4paper]{article}
+% ===== HUONG DAN TOAN TAP (per-device mega guide) — compile with XeLaTeX =====
+\usepackage{fontspec}
+\setmainfont{DejaVu Serif}[Scale=0.90]
+\setmonofont{DejaVu Sans Mono}[Scale=0.80]
+\usepackage[a4paper,margin=2.1cm]{geometry}
+\usepackage{graphicx,booktabs,longtable,xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{listings}
+\lstset{basicstyle=\ttfamily\small,breaklines=true,columns=fullflexible,
+        frame=leftline,framerule=0.6pt,rulecolor=\color{gray},xleftmargin=1em,
+        aboveskip=4pt,belowskip=4pt}
+\setlength{\emergencystretch}{3em}
+\setcounter{tocdepth}{2}
+\setlength{\parskip}{3pt}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+% Khối giải thích chuẩn cho MỌI lệnh: Làm gì / Tại sao / Nguồn
+\newcommand{\lam}[1]{\par\noindent\textbf{Làm gì:} #1}
+\newcommand{\why}[1]{\par\noindent\textbf{Tại sao:} #1}
+\newcommand{\src}[1]{\par\noindent\textbf{Nguồn:} #1}
+\newcommand{\kiem}[1]{\par\noindent\textbf{Kiểm ngay:} #1}
+\newcommand{\ly}[2]{\par\medskip\noindent\fbox{\parbox{0.97\linewidth}{\textbf{Lý thuyết — #1.} #2}}\medskip}
+
+\title{\textbf{CẨM NANG TOÀN TẬP\\Benchmark mật mã hậu lượng tử trên lưới\\(ML-KEM / ML-DSA vs RSA / ECC)}\\
+\large Hướng dẫn từng-lệnh-một cho người mới bắt đầu, tách riêng hai thiết bị\\x86\_64 (PC/laptop) và ARM (Raspberry Pi 4)}
+\author{NT219 — Cryptography Capstone}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+Tài liệu này dạy lại \emph{toàn bộ} repo từ con số không: mỗi câu lệnh đều có ``Làm gì / Tại sao / Nguồn / Kiểm ngay''; mỗi công nghệ đều có lý do chọn và đường link tài liệu gốc; mỗi giả thuyết nghiên cứu đều được nối thẳng tới phép đo trả lời nó. Cấu trúc theo đúng trục thiết bị: \textbf{Phần I} đi trọn vẹn trên x86\_64, \textbf{Phần II} đi trọn vẹn trên ARM, \textbf{Phần III} là khâu tổng hợp chung, kèm phụ lục tra cứu 51 file của repo và FAQ ``tại sao'' cho người mới.
+\end{abstract}
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section*{PHẦN MỞ ĐẦU — Đồ án này là gì, và bản đồ tổng}
+\addcontentsline{toc}{section}{PHẦN MỞ ĐẦU — Đồ án này là gì, và bản đồ tổng}
+
+\subsection*{0.1 Ba câu hỏi nghiên cứu → ba hướng đi → công nghệ tương ứng}
+Đề bài đặt ba câu hỏi (RQ) và một giả thuyết. Mọi thứ trong repo tồn tại để trả lời chúng — nếu một file không phục vụ RQ nào, nó không có mặt.
+
+\begin{longtable}{p{0.30\linewidth}p{0.30\linewidth}p{0.32\linewidth}}
+\toprule
+\textbf{Câu hỏi / giả thuyết} & \textbf{Hướng đi (phép đo)} & \textbf{Công nghệ — vì sao chọn}\\
+\midrule
+\textbf{RQ1}: PQC đắt hơn RSA/ECDSA bao nhiêu (tính toán, băng thông) trên x86 và ARM? & Microbenchmark cùng một mặt cắt đo cho mọi thuật toán; đo kích thước khóa/chữ ký; đo trên \emph{hai} máy thật. & \code{bench_evp.cpp} qua EVP API của OpenSSL 3.6.2 — một API chung cho cả RSA/ECC lẫn ML-KEM/ML-DSA nên so sánh công bằng; đồng hồ \code{CLOCK_MONOTONIC_RAW} đúng nguyên văn đề §8.3.\\
+\midrule
+\textbf{RQ2}: Tối ưu ARM (NEON, cờ biên dịch) có kéo PQC về mức khả thi trên SBC? & Thí nghiệm ghép cặp: \emph{cùng} liboqs, \emph{cùng} máy, hai bản build chỉ khác đúng một biến (SIMD tắt/bật). & liboqs hai cây \code{ref}/\code{opt} (\code{build_liboqs.sh}); chạy \code{speed_kem}/\code{speed_sig} của chính liboqs — đúng phương pháp OQS từng dùng trong hạ tầng profiling của họ.\\
+\midrule
+\textbf{RQ3}: Handshake hybrid (ECDHE + ML-KEM) có overhead chấp nhận được? & Đo TLS 1.3 handshake thật: latency + throughput, trên ma trận [chứng thư × nhóm trao đổi khóa], cả loopback lẫn LAN. & Ba server cùng lõi libssl: \code{s_server} (cô lập mật mã), \textbf{nginx} build từ nguồn (server sản xuất, trục đơn/đa luồng), \code{tls_mini_server.c} tự viết (đo phía server + bằng chứng group).\\
+\midrule
+\textbf{Giả thuyết} của đề: PQC tốn băng thông/khóa lớn hơn nhưng tối ưu phần mềm đưa hiệu năng về đủ dùng. & Nếu đúng: cột kích thước sẽ thua rõ, cột tốc độ sau tối ưu sẽ ngang/hơn RSA. & Chính bảng \code{analysis_out/tables.md} do \code{analyze.py} sinh ra là nơi giả thuyết được đối chiếu với số.\\
+\bottomrule
+\end{longtable}
+
+\subsection*{0.2 Bản đồ repo — nhìn một phát biết mọi thứ ở đâu}
+\begin{lstlisting}
+repo/
+  Makefile                <- cong tac tong: make / bench / memory / codesize / tls / analyze / tlsmini / tlsclient
+  README.md               <- cua chinh: quickstart 2 may + bang chon phuong an + bang bien env
+  scripts/                <- 21 script: build moi truong + do dac + phan tich
+  src/                    <- 3 nguon tu viet: bench_evp.cpp, tls_mini_server.c, tls_timer_client.c
+  cmake/                  <- toolchain cross-compile aarch64
+  docker/                 <- Dockerfile x86_64 (tai lap)
+  data/                   <- CSV ket qua (cam ket vao git!) + data/raw/<arch>/ bang chung tho
+  analysis_out/           <- bang + bieu do (cung cam ket: la deliverable)
+  docs/                   <- kich ban do, ho so thiet ke, bao cao LaTeX, cam nang nay
+\end{lstlisting}
+\why{Bố cục này ánh xạ mẫu §17 của đề (bảng ánh xạ chi tiết nằm cuối README): \code{benchmarks/micro} của đề chính là cặp \code{src/bench_evp.cpp}+\code{scripts/run_micro.sh}; \code{benchmarks/tls} là cụm script TLS; \code{tools/parsers} là \code{analyze.py}. Thư mục \code{energy/} của đề \emph{cố ý không có} — đề §13 cho phép khi thiếu thiết bị đo điện (Monsoon/INA219), và quyết định đó có hồ sơ ở mục Limitations của báo cáo.}
+
+\subsection*{0.3 Bốn định luật xuyên suốt — đọc trước khi gõ bất kỳ lệnh nào}
+\begin{enumerate}
+\item \textbf{Định luật người thuê nhà:} mọi phần mềm TLS (nginx, \code{s_server}, server tự viết, curl, wrk) đều ``thuê'' mật mã từ thư viện OpenSSL nó link. Muốn có ML-KEM/ML-DSA thì \emph{thư viện} phải là 3.5+ — đổi config, đổi cờ đều vô ích nếu thư viện bên dưới là 3.0. Đã chứng minh bằng mã nguồn: nginx gọi \code{SSL_CTX_set1_curves_list} (\code{ngx_event_openssl.c:1799}), server tự viết gọi \code{SSL_CTX_set1_groups_list} — hai tên của \emph{cùng một hàm} libssl.
+\item \textbf{Định luật bốn con số:} chỉ so trực tiếp hai số đo trên \emph{cùng một máy}. Muốn nói chuyện giữa hai máy thì so \emph{tỉ lệ} (opt/ref của máy này vs opt/ref của máy kia). Vì vậy mọi kịch bản đo chạy đủ trên từng máy.
+\item \textbf{Định luật tham số:} mặc định trong code chỉ là fallback; mọi vòng lặp/cổng/thời lượng chỉnh được qua biến môi trường (bảng đầy đủ ở Phụ lục B). \code{BENCH_ITERS=5000 make bench} và \code{make bench BENCH_ITERS=5000} đều tới đích (đã test sống).
+\item \textbf{Định luật bằng chứng:} số chưa push lên git coi như chưa tồn tại (máy thuê có thể bị thu hồi); mọi cơ chế trong repo đều đã chạy thật ít nhất một lần — nhật ký 10 mục trong \code{docs/THIET_KE_CHI_TIET.md} mục 9.
+\end{enumerate}
+
+\newpage
+% =====================================================================
+\section{PHẦN I — THIẾT BỊ 1: PC x86\_64 (Ubuntu 22.04/24.04)}
+
+\subsection{Lý thuyết nền cho người mới — đọc 10 phút trước khi chạm máy}
+
+\ly{PQC là gì và vì sao phải đo}{Máy tính lượng tử đủ lớn sẽ phá RSA và ECC (thuật toán Shor). NIST đã chuẩn hóa thế hệ thay thế dựa trên \emph{lưới} (lattice): \textbf{ML-KEM} (FIPS 203, tên cũ Kyber) cho trao đổi khóa, \textbf{ML-DSA} (FIPS 204, tên cũ Dilithium) cho chữ ký. Giá phải trả: khóa/chữ ký/bản mã \emph{to hơn nhiều} và chi phí tính toán \emph{khác} — to hơn ở đâu, nhanh chậm chỗ nào trên phần cứng thật, chính là việc đồ án đo. Nguồn: FIPS 203 \url{https://csrc.nist.gov/pubs/fips/203/final}, FIPS 204 \url{https://csrc.nist.gov/pubs/fips/204/final}.}
+
+\ly{KEM khác chữ ký — và hệ quả lên TLS}{Một handshake TLS có \emph{hai} việc mật mã độc lập: (1) \textbf{trao đổi khóa} (KEM/DH) — tạo bí mật chung tạm thời, dùng một lần rồi bỏ; (2) \textbf{xác thực danh tính} — server \emph{ký} để chứng minh nó là chủ certificate. ML-KEM thay việc (1); ML-DSA thay chữ ký trong việc (2). KEM \textbf{không bao giờ nằm trong certificate} (xác nhận bởi maintainer OpenSSL V. Dukhovni trên openssl-users) — vì vậy ma trận đo WP4 có \emph{hai trục độc lập}: trục group (KEM) và trục chứng thư (chữ ký).}
+
+\ly{Mức an toàn tương đương — để so cho công bằng}{So ML-KEM-768 với RSA-2048 mà kết luận ``PQC nhanh hơn'' là so lê với táo. Bảng quy đổi (FIPS 203/204 + NIST SP 800-57 \url{https://csrc.nist.gov/pubs/sp/800/57/pt1/r5/final}): mức 1 ($\approx$AES-128): ML-KEM-512/ML-DSA-44 $\leftrightarrow$ RSA-3072 $\leftrightarrow$ P-256; mức 3: ML-KEM-768/ML-DSA-65 $\leftrightarrow$ RSA-7680 $\leftrightarrow$ P-384; mức 5: ML-KEM-1024/ML-DSA-87 $\leftrightarrow$ RSA-15360 $\leftrightarrow$ P-521. RSA-2048 ($\approx$112-bit) vẫn được đo vì là baseline thực dụng phổ biến — nhưng khi viết kết luận phải chú thích nó dưới mức 1.}
+
+\ly{Benchmark nghĩa là đo gì}{Bốn họ chỉ số của đề §9: \textbf{latency} (một phép toán mất bao lâu — báo median/mean/p95/CI chứ không chỉ trung bình, vì máy tính có nhiễu: median ``người đứng giữa hàng'' miễn nhiễm với vài vòng đột biến); \textbf{throughput} (mỗi giây làm được bao nhiêu việc dưới tải song song); \textbf{memory} (đỉnh RAM tiến trình chiếm — peak RSS); \textbf{code size} (thư viện nặng bao nhiêu byte trên đĩa — text/data/bss). Hai khái niệm hay nhầm: memory đo lúc \emph{chạy}, code size đo lúc \emph{nằm im}.}
+
+\ly{Warm-up và K-batch — vì sao không đo một phát ăn ngay}{Vòng đầu tiên luôn chậm bất thường (cache lạnh, thư viện nạp lười) — bằng chứng sống trong repo: server tự viết ghi kết nối \#1 mất 7996µs trong khi \#2--3 chỉ $\sim$3800µs. Vì vậy: loại \code{BENCH_WARMUP} vòng đầu, và chạy K=5 \emph{batch} độc lập rồi lấy median-of-medians (đề §7.5) — một batch xui (nhiệt độ, tiến trình nền) không phá được kết quả.}
+
+\subsection{Bước 0 — Lấy repo về máy}
+\begin{lstlisting}
+git clone <URL-repo> && cd <ten-repo>
+chmod +x scripts/*.sh
+\end{lstlisting}
+\lam{Tải mã nguồn đồ án và cấp quyền thực thi cho 21 script.}
+\why{\code{chmod +x} cần thiết vì quyền thực thi có thể mất khi nén/chuyển máy; thiếu nó lệnh \code{bash scripts/...} vẫn chạy nhưng \code{./scripts/...} sẽ báo Permission denied — chuẩn hóa ngay từ đầu đỡ một câu hỏi về sau. Nếu file từng mở trên Windows và lỗi \code{\$'\\r': command not found}: \code{sed -i 's/\\r\$//' scripts/*.sh} (xóa ký tự xuống dòng kiểu Windows).}
+
+\subsection{Bước 1 — \texttt{install\_prereqs.sh}: cài đúng và đủ gói}
+\begin{lstlisting}
+bash scripts/install_prereqs.sh
+\end{lstlisting}
+\lam{Cài ba đợt gói: (1) toolchain biên dịch — \code{build-essential, cmake, ninja-build, perl, git}; (2) công cụ đo — GNU \code{time}, \code{linux-tools} (perf), \code{apache2-utils} (ab), \code{wrk}, \code{tshark}, \code{htop}, \code{cpupower}; (3) phân tích — \code{python3-matplotlib} (pandas tùy chọn).}
+\why{Mỗi đợt ánh xạ một mục đề: §8.2 đòi đúng bộ toolchain đó (OpenSSL cần \code{perl} để Configure; liboqs khuyên \code{ninja}); §7.4 gọi đích danh \code{/usr/bin/time -v} và \code{perf stat}; §16 gọi matplotlib. \textbf{Cố ý KHÔNG cài} \code{libssl-dev}: trộn header OpenSSL hệ thống với bản tự build là đúng lớp bug nguy hiểm nhất của dự án (mọi build đều trỏ tường minh vào \code{~/pqc/openssl}).}
+\src{danh sách gói đối chiếu kho Ubuntu 24.04; perf cần khớp kernel đang chạy nên script cài thêm \code{linux-tools-\$(uname -r)} — kernel cloud/Pi mang hậu tố riêng (-aws/-raspi).}
+\kiem{hộp thoại tshark hiện ra → chọn \textbf{Yes}, sau đó \code{sudo usermod -aG wireshark \$USER} và đăng nhập lại (quyền nhóm chỉ nạp lúc login).}
+
+\subsection{Bước 2 — \texttt{versions.env} \& \texttt{setenv.sh}: ghim phiên bản và bật môi trường}
+\ly{Vì sao ghim tag}{``Reproducible'' (đề §7.3) nghĩa là hai máy build hai ngày khác nhau vẫn ra cùng một phần mềm. Branch trôi theo thời gian; \emph{tag} thì bất biến. Toàn bộ phiên bản nằm một chỗ: \code{OPENSSL_TAG=openssl-3.6.2}, \code{LIBOQS_TAG=0.14.0}, \code{OQSPROVIDER_TAG=0.10.0}, \code{NGINX_TAG=release-1.30.2}. Muốn đổi: sửa một dòng, xóa nguồn cũ trong \code{~/pqc/src}, chạy lại với \code{FORCE=1}.}
+\begin{lstlisting}
+source scripts/setenv.sh      # MOI terminal moi deu phai chay
+which openssl                 # phai tra ve ~/pqc/openssl/bin/openssl
+\end{lstlisting}
+\lam{Đặt \code{PATH}, \code{LD_LIBRARY_PATH}, \code{PKG_CONFIG_PATH} trỏ về OpenSSL của ta.}
+\why{Phải \code{source} chứ không \code{./}: biến môi trường đặt trong tiến trình con sẽ chết theo nó — \code{./setenv.sh} chạy xong là biến bay màu. Repo chọn \textbf{không nướng rpath} vào binary (đúng quy ước demos chính chủ OpenSSL \url{https://github.com/openssl/openssl/tree/master/demos}): thư viện được tìm \emph{lúc chạy} qua \code{LD_LIBRARY_PATH} — binary di dời được, cơ chế tường minh. Bằng chứng sống về hậu quả khi quên: chạy \code{ldd} lên nginx \emph{thiếu} biến này → loader té về libssl hệ thống và văng \code{OPENSSL_3.2.0 not found} — binary không nạp nổi.}
+
+\subsection{Bước 3 — \texttt{build\_openssl.sh}: dựng nền móng (OpenSSL 3.6.2 PQC-native)}
+\ly{Vì sao phải tự build OpenSSL}{Ubuntu 24.04 ship OpenSSL 3.0.x — \emph{không có} ML-KEM/ML-DSA (hai họ này ``added in OpenSSL 3.5'' — nguyên văn tài liệu \url{https://docs.openssl.org/3.5/man7/EVP_PKEY-ML-DSA/}). Không có thư viện 3.5+ thì mọi phép đo PQC bất khả. Ta build 3.6.2 vào \code{~/pqc/openssl}, \emph{không đụng} OpenSSL hệ thống — hệ điều hành vẫn an toàn, gỡ sạch = \code{rm -rf ~/pqc}.}
+\begin{lstlisting}
+bash scripts/build_openssl.sh          # lan dau: chay du test suite (~20-40 phut)
+# cac lan sau / may yeu:  SKIP_TESTS=1 bash scripts/build_openssl.sh
+\end{lstlisting}
+\lam{Bên trong script làm 6 việc, mỗi việc một lý do:}
+\begin{enumerate}
+\item \code{git clone --depth 1 --branch \$OPENSSL_TAG https://github.com/openssl/openssl.git} → tải \emph{đúng} bản ghim từ repo chính chủ; \code{--depth 1} = nông, chỉ lấy snapshot (nhanh, nhẹ).
+\item \code{./Configure --prefix=\$HOME/pqc/openssl} → khai nơi cài; mọi thứ gom dưới \code{~/pqc}.
+\item \code{make -j \$JOBS} → biên dịch song song theo số nhân CPU (đọc từ versions.env).
+\item \code{make test} (bỏ qua được bằng \code{SKIP_TESTS=1}) → bộ test chính chủ chứng minh bản build \emph{đúng đắn} — chạy đủ ít nhất một lần mỗi máy làm bằng chứng; các lần rebuild sau được phép bỏ (quy ước giống CI của oqs-demos).
+\item \code{make install_sw install_ssldirs} → \code{install_sw} cài gọn (bỏ man pages); \code{install_ssldirs} tạo \code{openssl.cnf} — \textbf{thiếu nó là lệnh \code{openssl req} chết}. Đây không phải lý thuyết: bản build đi tắt trong sandbox đã bỏ bước này và \code{req} fail thật với lỗi ``Can't open .../openssl.cnf''.
+\item ghi \code{docs/openssl.commit} → bằng chứng tái lập: commit hash chính xác của bản đã build.
+\end{enumerate}
+\kiem{\code{source scripts/setenv.sh \&\& openssl version} → phải in \code{OpenSSL 3.6.2}; \code{openssl list -kem-algorithms | grep ML-KEM} → phải thấy ML-KEM-512/768/1024.}
+
+\subsection{Bước 4 — \texttt{verify\_env.sh}: cánh cổng và tờ biên bản}
+\begin{lstlisting}
+bash scripts/verify_env.sh             # phai in PASS
+cat docs/env_report_x86_64.txt         # bien ban moi truong cua MAY NAY
+\end{lstlisting}
+\lam{Một script hai vai: (1) \emph{cổng chặn} — kiểm OpenSSL đang dùng có ML-KEM/ML-DSA không, sai thì exit 1 kèm hướng dẫn sửa; (2) \emph{biên bản} — ghi compiler, cờ build, CPU, governor ra \code{docs/env_report_<arch>.txt}.}
+\why{Vai (1) chống lớp lỗi tệ nhất của mật mã: \emph{fail im lặng} — âm thầm đo trên OpenSSL 3.0 hệ thống rồi ra số ``có vẻ đúng''. Vai (2) trả lời nguyên văn đề §7.3: ``Document compiler versions (gcc/clang), flags, and CPU governor settings''. Governor đọc từ \code{/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor} (tài liệu kernel: \url{https://www.kernel.org/doc/html/latest/admin-guide/pm/cpufreq.html}).}
+\kiem{cả hai nhánh đã chạy thật: trỏ vào OpenSSL 3.0 → FAIL đúng; môi trường chuẩn → PASS + sinh report.}
+
+\subsection{Bước 5 — \texttt{make}: dựng harness đo \texttt{bench\_evp}}
+\begin{lstlisting}
+make            # bien dich src/bench_evp.cpp -> build/bench_evp
+\end{lstlisting}
+\lam{Makefile đọc \code{versions.env} để biết OpenSSL ở đâu, tự dò \code{lib/} hay \code{lib64/} (OpenSSL chọn theo nền tảng), biên dịch \code{bench_evp.cpp} với \code{-O2 -Wall} và link \code{-lcrypto -pthread}.}
+\why{Từng lựa chọn trong Makefile có lý do: \code{-O2} là mức tối ưu chuẩn đo lường (mã ta \emph{bao quanh} phép đo cần nhanh nhưng không được đổi ngữ nghĩa như -O3 đôi khi gây); \code{\$(error ...)} khi thiếu OpenSSL — \emph{fail to be loud}, thà chết sớm với thông điệp rõ còn hơn lỗi khó hiểu ở bước link; \code{-pthread} thay \code{-lpthread} là cách hiện đại (đặt cả cờ compile lẫn link).}
+\ly{EVP API là gì và vì sao chọn nó}{EVP là ``mặt tiền'' thống nhất của OpenSSL: cùng một bộ hàm \code{EVP_PKEY_keygen/encapsulate/sign/verify} cho \emph{mọi} thuật toán — RSA, ECDSA, ML-KEM, ML-DSA chỉ khác cái tên truyền vào. Đo qua EVP nghĩa là mọi thuật toán đi qua \emph{cùng một lớp chi phí giao tiếp} → chênh lệch đo được là chênh lệch \emph{thuật toán}, không phải chênh lệch cách gọi. Tên thuật toán lấy nguyên văn tài liệu: \code{ML-KEM-768} (\url{https://docs.openssl.org/3.5/man7/EVP_PKEY-ML-KEM/}), \code{ML-DSA-65} (\url{https://docs.openssl.org/3.5/man7/EVP_PKEY-ML-DSA/}).}
+\ly{Đồng hồ CLOCK\_MONOTONIC\_RAW}{Đề §8.3 chỉ định đích danh. ``Monotonic'' = chỉ tiến không lùi (không bị NTP chỉnh giờ kéo ngược); ``RAW'' = không bị kernel nắn tần số. Đo hiệu năng mà dùng đồng hồ tường (CLOCK\_REALTIME) là tự rước nhiễu. bench\_evp còn đọc kèm bộ đếm chu kỳ CPU (rdtsc/cntvct) để \emph{kiểm chéo}: tỉ lệ thời gian giữa hai thuật toán phải khớp tỉ lệ chu kỳ — và trên số thật đã khớp.}
+\kiem{\code{./build/bench_evp mlkem 768} chạy thử một thuật toán; cú pháp \code{<họ> <tham số>}: \code{rsa 2048|3072|4096|15360}, \code{ecdsa|ecdh p256|p384|p521}, \code{mlkem 512|768|1024}, \code{mldsa 44|65|87}.}
+
+\subsection{Bước 6 — \texttt{build\_liboqs.sh}: dựng HAI cây cho thí nghiệm RQ2}
+\begin{lstlisting}
+bash scripts/build_liboqs.sh ref      # cay C thuan: SIMD TAT tuong minh
+bash scripts/build_liboqs.sh opt      # cay toi uu: -march=native, AVX2 bat
+\end{lstlisting}
+\lam{Build liboqs 0.14.0 hai lần vào hai prefix riêng (\code{~/pqc/liboqs-ref}, \code{~/pqc/liboqs-neon}), giữ lại thư mục \code{build-*/tests} chứa \code{speed_kem}/\code{speed_sig}.}
+\why{Đây là \emph{thí nghiệm ghép cặp} (đề §7.5 ``paired comparisons''): cùng phiên bản, cùng máy, cùng compiler — biến độc lập \emph{duy nhất} là tối ưu vi kiến trúc. \code{ref} ép \code{OQS_OPT_TARGET=generic} (tắt hẳn AVX2/NEON); \code{opt} để \code{-march=native} tự dò. Bản \code{opt} đặt \code{OQS_DIST_BUILD=OFF} — tài liệu cấu hình liboqs (\url{https://github.com/open-quantum-safe/liboqs/blob/main/CONFIGURE.md}) ghi rõ DIST\_BUILD bật là build ``chạy mọi nơi'' (chọn SIMD lúc chạy); ta đo trên đúng máy này nên tắt để khai thác tối đa. Trên x86, ``opt'' chủ yếu = AVX2; số thật đã đo trên máy sinh viên: keygen ML-KEM-768 \textbf{30.985µs (ref) → 10.705µs (opt) = ×2.89}.}
+\src{liboqs chính chủ \url{https://github.com/open-quantum-safe/liboqs}; phương pháp dùng speed tools là phương pháp OQS từng dùng trong hạ tầng đo của họ (\url{https://github.com/open-quantum-safe/profiling} — repo nay archive, ta cite làm tài liệu phương pháp, không dùng code).}
+\kiem{\code{~/pqc/src/liboqs/build-ref/tests/speed_kem ML-KEM-768} — banner phải in \code{CPU extensions: SSE SSE2} (ref) còn cây opt in \code{AVX2...}; đó là bằng chứng hai cây khác đúng chỗ cần khác.}
+
+\subsection{Bước 7 — \texttt{fetch\_pqclean.sh}: nguồn duy nhất cho code-size từng thuật toán}
+\begin{lstlisting}
+bash scripts/fetch_pqclean.sh clean          # ban C thuan, .a rieng tung thuat toan
+bash scripts/fetch_pqclean.sh avx2           # (tuy chon) ban SIMD de so kich thuoc
+\end{lstlisting}
+\lam{Clone PQClean (ghim theo \emph{commit}), build các thư viện tĩnh \code{libml-kem-768_clean.a}, \code{libml-dsa-65_clean.a}\ldots — mỗi thuật toán một file.}
+\why{\code{libcrypto.so}/\code{liboqs.so} trộn \emph{mọi} thuật toán trong một file — công cụ \code{size} không tách nổi ``riêng ML-KEM chiếm bao nhiêu byte''. PQClean build mỗi scheme một \code{.a} → con số code-size \emph{per-algorithm} (đề §9) chỉ có từ đây. So \code{clean} với \code{avx2} còn trả lời ``tốc độ đổi bằng bao nhiêu byte mã''. Ghim \emph{commit} thay vì tag vì tag mới nhất của PQClean là round2/round3 cổ (tiền chuẩn hóa). Ghi nhận chính thức trong README dự án: PQClean sẽ archive read-only 07/2026, kế nhiệm là PQ Code Package — chi tiết này vào Literature của báo cáo.}
+\src{\url{https://github.com/PQClean/PQClean}.}
+\kiem{script có \emph{rào chắn chéo kiến trúc}: gọi \code{aarch64} trên máy x86 sẽ bị chặn kèm hướng dẫn — rào này sinh ra từ một lần fail thật (assembly NTT viết tay không cross-compile được).}
+
+\subsection{Bước 8 — \texttt{build\_oqsprovider.sh}: đường tích hợp kế nhiệm}
+\begin{lstlisting}
+bash scripts/build_oqsprovider.sh ref        # (tuy chon o muc do chinh)
+\end{lstlisting}
+\lam{Build oqs-provider 0.10.0 cắm vào OpenSSL của ta, theo đúng hai biến README chính chủ yêu cầu: \code{OPENSSL_ROOT_DIR} + \code{liboqs_DIR}.}
+\why{Đề §7.2 nhắc ``OpenSSL OQS fork'' — nhưng fork 1.1.1 đó \emph{đã ngừng phát triển}; README của chính nó (\url{https://github.com/open-quantum-safe/openssl}) trỏ người dùng sang \textbf{oqs-provider} (\url{https://github.com/open-quantum-safe/oqs-provider}). Ta làm theo lời khuyên chính chủ và ghi rõ trong báo cáo. Vai trò: bằng chứng tích hợp + mở thuật toán ngoài chuẩn; \emph{số đo chính} vẫn từ ML-KEM/ML-DSA native của OpenSSL 3.5+ — một lớp ít hơn là một nguồn nhiễu ít hơn.}
+
+\subsection{Bước 9 — \texttt{gen\_tls\_certs.sh}: chứng thư cho trục chữ ký}
+\ly{Certificate, trusted và untrusted — 5 phút nắm trọn}{Trong TLS, \emph{server} chìa certificate (danh tính + khóa công khai, được \emph{ai đó ký}); \emph{client} kiểm ``người ký có nằm trong danh sách tôi tin không''. Web thật: CA độc lập (Let's Encrypt) ký → client tin sẵn → \emph{trusted}. Đồ án: cert \textbf{tự ký} (Issuer = Subject = localhost — xem được bằng \code{openssl x509 -noout -subject -issuer}) → mặc định \emph{untrusted} (client báo verify error 18). Cách xử có kiểm soát: copy file \code{.cert.pem} (phần \emph{công khai} — được phép lan truyền) sang máy client rồi trao qua \code{-CAfile} → client verify ra \code{0 (ok)}. \textbf{Tuyệt đối không} copy \code{.key.pem} (bí mật của server; .gitignore cũng chặn). Chiều đi của cert: \emph{server → client}; client trong TLS thường \emph{không có} cert (mTLS hai chiều là chế độ đặc biệt, đồ án không dùng).}
+\begin{lstlisting}
+bash scripts/gen_tls_certs.sh
+# mo rong ma tran:  CERT_SET="mldsa44 mldsa87 rsa3072" FORCE=1 bash scripts/gen_tls_certs.sh
+\end{lstlisting}
+\lam{Sinh ba cặp khóa+cert tự ký vào \code{~/pqc/tls/}: \code{rsa2048} (baseline thực dụng), \code{ecp256} (baseline elliptic), \code{mldsa65} (hậu lượng tử mức 3).}
+\why{Sinh khóa kiểu \emph{hai bước} \code{genpkey} rồi \code{req -x509 -key}: chỉ dùng cú pháp được tài liệu hóa chắc chắn cho thuật toán mới (\code{genpkey -algorithm ML-DSA-65} nằm nguyên văn trong manpage), né rủi ro cú pháp \code{-newkey} với tên alg lạ. Khóa nằm \emph{ngoài} repo (\code{~/pqc/tls}) — khóa bí mật không bao giờ vào git.}
+\src{tên thuật toán: \url{https://docs.openssl.org/3.5/man7/EVP_PKEY-ML-DSA/}.}
+
+\subsection{Bước 10 — ĐO WP2: microbenchmark K-batch (số liệu xương sống)}
+\begin{lstlisting}
+sudo cpupower frequency-set -g performance     # (1)
+for i in 1 2 3 4 5; do                          # (2)
+  BENCH_WARMUP=50 BENCH_ITERS=5000 make bench   # (3)
+  cp data/summary_micro_x86_64.csv \
+     data/raw/x86_64/summary_batch$i.csv        # (4)
+done                                            # (5)
+\end{lstlisting}
+\textbf{Giải thích từng dòng:}
+\begin{enumerate}
+\item Ghim CPU ở xung tối đa. Mặc định Linux dùng governor tiết kiệm điện — xung nhảy theo tải làm hai lần đo cùng một thuật toán ra hai số khác nhau. Đề §7.4 yêu cầu đích danh (``fix CPU frequency''). Nguồn cơ chế: tài liệu cpufreq của kernel (link ở Bước 4).
+\item Vòng K=5 \emph{batch} độc lập — đề §7.5: ``run at least K batches (e.g., 5--10)''.
+\item Một batch: \code{make bench} gọi \code{run_micro.sh} quét cả ma trận 12 thuật toán, mỗi cái M vòng. Hai biến env nâng vòng lên mức ``lấy số thật'' (mặc định 20/2000 chỉ là mức nháp). \code{run_micro.sh} ghi \code{data/summary_micro_x86_64.csv} dạng dài \code{algo,metric,value} — dạng dài để thêm metric không vỡ schema.
+\item Cất bản batch vào \code{data/raw/} với số thứ tự — 5 file này là \emph{bằng chứng} K-batch và đầu vào cho phân tích sâu (bootstrap CI) ở tuần tổng hợp; \code{analyze.py} dùng bản summary mới nhất.
+\item Hết vòng — trên x86 không cần nghỉ giữa batch (tản nhiệt PC đủ tốt; Pi thì khác, xem Phần II).
+\end{enumerate}
+
+\subsection{Bước 11 — ĐO WP5: bộ nhớ và kích thước mã}
+\begin{lstlisting}
+make memory          # -> data/memory_x86_64.csv   (algo, peak_rss_kb)
+make codesize        # -> data/codesize_x86_64.csv (file, text,data,bss,total)
+size ~/pqc/src/PQClean/crypto_*/ml-*/clean/lib*.a \
+  | tee data/raw/x86_64/pqclean_clean_size.txt
+\end{lstlisting}
+\lam{\code{make memory} bọc từng thuật toán bằng \code{/usr/bin/time -v} và đọc dòng ``Maximum resident set size'' = \textbf{đỉnh RAM} tiến trình từng chạm. \code{make codesize} chạy \code{size} (binutils) lên \code{libcrypto.so}/\code{liboqs.so} lấy text/data/bss. Lệnh thứ ba đo \emph{per-algorithm} qua các \code{.a} của PQClean.}
+\why{\code{/usr/bin/time} là GNU time — đề §7.4 gọi đích danh; chú ý \emph{không phải} \code{time} builtin của shell (builtin không biết RSS). Ý nghĩa ba cột size: \code{text} = mã máy, \code{data} = hằng/bảng tra đã khởi tạo, \code{bss} = vùng zero-fill; tổng = ``thuật toán nặng bao nhiêu trên đĩa/flash''. Caveat ghi thẳng vào script: số của libcrypto là số \emph{trộn} mọi thuật toán — per-algorithm chỉ tin được từ PQClean.}
+\src{man \code{time(1)}, man \code{size(1)}; đề §7.4 nguyên văn ``\code{size} utility, readelf -S... peak RSS via /usr/bin/time -v''.}
+
+\subsection{Bước 12 — ĐO WP3: đổ số ref/opt thành CSV}
+\begin{lstlisting}
+bash scripts/run_liboqs_speed.sh
+# -> data/liboqs_speed_x86_64.csv  (arch,variant,algo,op,iterations,mean_us,stdev_us,cycles_mean)
+# -> data/raw/x86_64/liboqs_<variant>_<algo>.txt  (output goc lam bang chung)
+\end{lstlisting}
+\lam{Chạy \code{speed_kem}/\code{speed_sig} của \emph{cả hai cây} trên 6 thuật toán (3 KEM + 3 chữ ký), lưu output gốc, và parse bảng kết quả thành CSV.}
+\why{Mặc định hai tool đó chỉ \emph{in màn hình} — đề §11.4 đòi ``raw CSVs''. Parser awk được viết \emph{ngược từ output thật} của lần chạy trên máy sinh viên (lọc theo cấu trúc: dòng có $\geq$7 cột phân tách \code{|} và cột 2 là số) — đã kiểm: 3 dòng CSV ra đúng từng chữ số (30.985/30.963/36.250). Script tự thích nghi: cây nào chưa build thì bỏ qua kèm thông báo — trên x86 chỉ có \code{ref} vẫn ra CSV hợp lệ.}
+\kiem{\code{head -5 data/liboqs_speed_x86_64.csv} thấy đủ cột; bảng speedup ref/opt sẽ tự mọc trong \code{tables.md} khi đủ \emph{cả hai} variant cho ít nhất một thuật toán.}
+
+\subsection{Bước 13 — ĐO WP4: TLS handshake, BA phương án cùng một thước đo}
+\ly{Handshake TLS 1.3 đo cái gì}{Một kết nối HTTPS mở màn bằng \emph{handshake}: client chào (kèm key-share của nhóm trao đổi khóa nó đoán server thích), server đáp (chọn nhóm, \emph{chìa certificate}, \emph{ký} để chứng minh danh tính), hai bên dẫn xuất khóa phiên. PQC chen vào đúng hai chỗ: nhóm trao đổi khóa (\code{X25519MLKEM768} lai, \code{MLKEM768} thuần) và chữ ký trong cert (\code{ML-DSA-65}). Tên nhóm lấy nguyên văn tài liệu \url{https://docs.openssl.org/3.5/man3/SSL_CTX_set1_groups_list/} — trang này còn cho biết ``DEFAULT list selects X25519MLKEM768 as one of the predicted keyshares'' (OpenSSL 3.5+ \emph{mặc định} đã ưu tiên lai hậu lượng tử).}
+\ly{Vì sao tắt resumption khi đo}{TLS 1.3 có cơ chế nối lại phiên (session ticket/PSK): kết nối sau \emph{bỏ qua} truyền certificate. Nếu để bật, từ kết nối thứ hai bạn đo một handshake \emph{rút gọn} — số vô nghĩa cho việc so cert PQC (cert ML-DSA to gấp nhiều lần là điểm cần lộ ra!). Vì vậy mọi cấu hình đo đều tắt: \code{-no_ticket}/\code{ssl_session_cache off + ssl_session_tickets off}.}
+
+\subsubsection{Phương án A — \texttt{make tls} (server = \texttt{openssl s\_server}): cô lập mật mã}
+\begin{lstlisting}
+make tls     # ~5-10 phut -> data/tls_handshake_x86_64.csv
+\end{lstlisting}
+\lam{\code{bench_tls.sh} dựng \code{s_server} với từng cert, rồi với từng group: (latency) lặp \code{TLS_ITERS} handshake \emph{tuần tự}, bấm giờ từng cái → median/mean/p95; (throughput) thả \code{TLS_CONC} client \emph{song song} trong \code{TLS_DUR} giây → handshake/giây. ``Client'' là hàm \code{one_handshake()} bọc \code{openssl s_client -groups ... -CAfile ... -verify_return_error}.}
+\why{\code{s_server} là server mỏng nhất có thể — gần như chỉ có libssl, nên số của nó \emph{cô lập chi phí mật mã} khỏi mọi kiến trúc server. Cờ \code{-verify_return_error} bắt client \emph{fail hẳn} nếu verify cert rớt → mọi handshake được đếm đều gồm verify thành công, đúng như client thật ngoài đời. \textbf{Vì sao không wrk:} wrk của distro link OpenSSL hệ thống (3.0, không ML-KEM) — chỉ được dùng làm đối chứng công cụ trên hàng X25519.}
+
+\subsubsection{Phương án B — nginx: server sản xuất + trục đơn/đa luồng}
+\textbf{B.1 — \code{build_nginx.sh}: dựng nginx ``thuê'' đúng OpenSSL.}
+\begin{lstlisting}
+bash scripts/build_nginx.sh    # x86 vai phut
+\end{lstlisting}
+\lam{Clone mirror chính chủ \url{https://github.com/nginx/nginx} tag \code{release-1.30.2}, rồi:}
+\begin{lstlisting}
+auto/configure --prefix=$NGINX_PREFIX --with-http_ssl_module \
+  --without-http_rewrite_module --without-http_gzip_module \
+  --with-cc-opt="-I$OSSL_PREFIX/include" --with-ld-opt="-L$OSSL_LIBDIR"
+\end{lstlisting}
+\why{từng cờ: \code{--with-http_ssl_module} bật TLS (nginx mặc định tắt); \code{--without-rewrite/gzip} né kéo PCRE/zlib-dev (triết lý gói tối thiểu — hệ quả đã đụng thật: mất directive \code{return}, nên config trả \emph{file tĩnh}); cặp \code{cc-opt/ld-opt} trỏ header+lib vào OpenSSL \emph{của ta} = link \textbf{động} — tái dùng OpenSSL đã build (ARM khỏi build lại $\sim$1 giờ), một thư viện một nguồn sự thật; chạy lúc nào cũng qua \code{setenv.sh} (LD\_LIBRARY\_PATH) đúng quy ước no-rpath toàn repo. Cuối script tự kiểm \code{nginx -V} phải in \code{built with OpenSSL 3.6} — chốt chặn bắt lỗi ``thuê nhầm nhà'' ngay tại bước build thay vì để nổ ở bước đo.}
+\kiem{đã build sống và kiểm trọn trong môi trường thử: \code{nginx -V} → \code{built with OpenSSL 3.6.2}; \code{nginx -t} \emph{nhận} chuỗi group PQC và \emph{từ chối} group bịa với lỗi lộ đúng hàm \code{SSL_CTX_set1_curves_list(...) failed}.}
+
+\textbf{B.2 — \code{nginx_bench.conf}: giải thích TỪNG DÒNG.}
+\begin{lstlisting}
+worker_processes __WORKERS__;
+daemon off;
+error_log logs/error.log warn;
+pid logs/nginx.pid;
+events { worker_connections 1024; }
+http {
+  access_log off;
+  server {
+    listen __LISTEN__:__PORT__ ssl;
+    ssl_certificate     __CRT__;
+    ssl_certificate_key __KEY__;
+    ssl_protocols TLSv1.3;
+    ssl_ecdh_curve __GROUPS__;
+    ssl_session_cache off;
+    ssl_session_tickets off;
+    location / { root html; }
+  }
+}
+\end{lstlisting}
+\begin{itemize}
+\item \code{worker_processes __WORKERS__} — script điền \code{1} hoặc \code{auto}: chính là trục ``single-threaded and multi-threaded servers'' đề §7.4 đòi, thứ \code{s_server} không có.
+\item \code{daemon off} — nginx chạy \emph{foreground}: script cầm trực tiếp PID để tắt sạch giữa các tổ hợp, không lần mò pid-file.
+\item \code{error_log ... warn} / \code{pid logs/nginx.pid} — đường ghi tương đối theo \code{-p rundir}: mỗi lần đo một thư mục tạm riêng, không vương vãi.
+\item \code{worker_connections 1024} — trần kết nối mỗi worker; 1024 dư cho \code{TLS_CONC} mặc định 4.
+\item \code{access_log off} — tắt ghi log mỗi request: loại nhiễu I/O đĩa khỏi phép đo.
+\item \code{listen __LISTEN__:__PORT__ ssl} — \code{__LISTEN__} = \code{127.0.0.1} (đo loopback) hoặc \code{0.0.0.0} (đo qua LAN, Phần II/III).
+\item \code{ssl_certificate(_key)} — danh tính server; bên dưới nginx gọi \code{SSL_CTX_use_certificate}/\code{use_PrivateKey} (nguồn nginx \code{ngx_event_openssl.c:504/608}) — \emph{cùng hàm} server tự viết của ta gọi.
+\item \code{ssl_protocols TLSv1.3} — khóa đúng một phiên bản: loại biến nhiễu ``thương lượng version''.
+\item \code{ssl_ecdh_curve __GROUPS__} — cửa ngõ PQC: tài liệu module (\url{https://nginx.org/en/docs/http/ngx_http_ssl_module.html}) định nghĩa là ``list of curves supported by the server''; bên dưới là \code{SSL_CTX_set1_curves_list} (:1799) — tên cũ của \code{set1_groups_list}, \emph{một hàm hai tên}. Xác nhận đường PQC: issue nginx \#532; \textbf{bẫy đã tra}: ticket \#2542 — directive này bị bỏ qua \emph{lặng lẽ} ở server block không-default → mọi thứ nằm trong block default duy nhất.
+\item \code{ssl_session_cache off + ssl_session_tickets off} — ép \emph{mọi} kết nối là full handshake (lý thuyết ở đầu Bước 13).
+\item \code{location / { root html; }} — trả file tĩnh \code{html/index.html} (``ok'') vì \code{return} thuộc module rewrite đã tắt; phản hồi vẫn tối giản.
+\end{itemize}
+
+\textbf{B.3 — \code{bench_tls_nginx.sh}: chạy ma trận 18 ô.}
+\begin{lstlisting}
+bash scripts/bench_tls_nginx.sh
+# -> data/tls_handshake_nginx-x86_64.csv (them cot server,workers)
+\end{lstlisting}
+\why{Ba vòng lặp lồng nhau \code{workers (1,auto)} × \code{cert (3)} × \code{group (3)} = 18 hàng; \emph{phương pháp đo giữ y hệt} phương án A (cùng vòng latency, cùng bão song song) — chủ ý, để hai bộ số đối chứng nhau: A = chi phí mật mã thuần, B = thêm giá của một server thật + chiều đa lõi; hiệu số chính là ``giá của vỏ''. Tên file mang chữ \code{nginx-} để \code{analyze.py} tự nhặt và tự dán nhãn — không sửa một dòng code phân tích.}
+
+\subsubsection{Phương án C — cặp client/server TỰ TRIỂN KHAI (đỉnh của §7.6)}
+\ly{``Tự triển khai'' nghĩa là gì — ranh giới quan trọng}{Tự sở hữu \emph{ba} thứ: tầng TCP (\code{socket/bind/listen/accept} hoặc \code{connect}), tầng HTTP tối giản, và \emph{luồng điều khiển + điểm đo}. Phần mật mã TLS vẫn thuê thư viện libssl — \textbf{đúng đắn và bắt buộc} (tự viết lại giao thức TLS vi phạm định luật ``đừng tự chế crypto''; chính nginx cũng thuê libssl). Khác biệt với \code{s_client/s_server}: ta gọi \code{SSL_accept}/\code{SSL_connect} \emph{trực tiếp trong C}, tự bấm giờ, tự chọn group — không giao cho một binary đóng kín rồi đọc text nó in.}
+\begin{lstlisting}
+make tlsmini tlsclient
+# server (cua so 1):
+./build/tls_mini_server ~/pqc/tls/mldsa65.cert.pem ~/pqc/tls/mldsa65.key.pem 9443 \
+   | tee data/raw/x86_64/tlsmini_handshakes.csv
+# client (cua so 2):
+./build/tls_timer_client 127.0.0.1 9443 X25519MLKEM768 50 ~/pqc/tls/mldsa65.cert.pem
+\end{lstlisting}
+\lam{\textbf{Server} (\code{src/tls_mini_server.c}, mẫu theo demo chính chủ \url{https://github.com/openssl/openssl/tree/master/demos/guide} — \code{tls-server-block.c}): TCP của ta → bàn giao fd qua đúng ba dòng \code{SSL_new → SSL_set_fd → SSL_accept} → HTTP 200 tối giản, \code{Connection: close} để \emph{mỗi kết nối = một full handshake = một đơn vị đo sạch}; kẹp \code{CLOCK_MONOTONIC_RAW} quanh \code{SSL_accept} và in mỗi kết nối một dòng \code{conn,tls,group,handshake_us} — cột \code{group} (qua \code{SSL_get_negotiated_group}) là \emph{bằng chứng cứng} phiên đo thật sự chạy MLKEM768. \textbf{Client} (\code{src/tls_timer_client.c}, soi gương \code{s_timer.c} của Paquin--Stebila--Tamvada, mã tại \url{https://github.com/xvzcf/pq-tls-benchmark}, bài báo \url{https://eprint.iacr.org/2019/1447}): \code{BIO_s_connect → SSL_new → SSL_set_bio → SSL_connect} lặp N lần \emph{trong cùng tiến trình}, bấm giờ từng \code{SSL_connect}, in CSV + median.}
+\why{Client tự viết tồn tại vì \code{s_client} spawn một tiến trình mỗi handshake (chi phí fork/exec vài ms cộng đều) — đủ tốt cho \emph{chênh lệch} giữa các group trên cùng máy, nhưng số \emph{tuyệt đối} sạch cỡ paper thì cần đo trong-tiến-trình — đúng lý do giới học thuật viết \code{s_timer.c}. Hai phía đo hai nửa: client = handshake + round-trip + dựng kết nối; server = đúng đoạn \code{SSL_accept}; \emph{hiệu hai số} tách chi phí đường truyền khỏi chi phí mật mã tại server. Cả hai đều fail-loudly với group lạ (\code{TLS_GROUPS}/đối số group bịa → FATAL kèm lỗi gốc OpenSSL) — cùng cơ chế với nginx, vì cùng một hàm bên dưới.}
+\kiem{cặp này đã bắt tay sống: client median 1686µs, server ghi $\sim$1500--1700µs cùng các kết nối (kết nối \#1 lộ warm-up 7996µs); client ép TLS 1.2 bị server từ chối bằng \code{alert protocol version} — ``TLS 1.3 only'' có răng.}
+
+\subsection{Bước 14 — \texttt{make analyze}: từ CSV thành bảng và biểu đồ}
+\begin{lstlisting}
+make analyze        # -> analysis_out/tables.md + *.png
+\end{lstlisting}
+\lam{\code{analyze.py} quét \emph{mọi} CSV trong \code{data/}, sinh: bảng median micro theo máy; bảng \emph{Cross-platform ratio} (chỉ xuất hiện khi đủ hai máy — bắc cầu bằng tỉ lệ, định luật bốn-con-số); bảng+biểu đồ RSS, code size; bảng+biểu đồ TLS (grouped bar theo cert×group, riêng cho s\_server và nginx); bảng \emph{speedup ref→opt} của WP3.}
+\why{Chỉ dùng \code{csv} chuẩn + matplotlib (pandas không bắt buộc — bớt một phụ thuộc); matplotlib vắng vẫn ra bảng (suy thoái có kiểm soát). Mọi schema đọc \emph{đúng} schema thật của các script đo — và chính smoke-test đã bắt được một bug thật (tách tên kiến trúc hỏng vì \code{x86_64} chứa \code{_}) trước khi nó kịp ra trận.}
+\kiem{mở \code{analysis_out/tables.md}; thấy bảng ``liboqs ref vs opt'' với speedup ×2.6--2.9 (khi đủ hai cây) là chuỗi WP3 đã thông suốt từ binary tới biểu đồ.}
+
+\subsection{Bước 15 — Docker (tái lập, tùy chọn trên x86)}
+\begin{lstlisting}
+docker build -f docker/Dockerfile.x86_64 -t nt219-pqc .     # tu GOC repo
+bash scripts/docker_buildx.sh                                # multiarch (can binfmt)
+\end{lstlisting}
+\why{Dockerfile \emph{tái dùng chính script của repo} (build\_openssl, make, verify\_env) — một nguồn sự thật; \code{verify_env.sh} cuối image khiến image \emph{tự fail} khi hỏng. buildx dựng đa kiến trúc qua QEMU (\url{https://docs.docker.com/build/building/multi-platform/}) — vai trò là \emph{bằng chứng đóng gói} §7.3; \textbf{định luật}: không bao giờ đo trong QEMU — số của trình giả lập, không phải của CPU.}
+
+\subsection{Bước 16 — Tùy chọn x86 (mở rộng chiều dữ liệu) + nghiệm thu}
+\begin{lstlisting}
+~/pqc/openssl/bin/openssl speed rsa2048 ecdsap256   # doi chung cong cu cho WP2
+wrk -t4 -c16 -d10s https://127.0.0.1:8443/          # CHI hang X25519 (wrk link OpenSSL he thong)
+sudo tshark -i lo -f "tcp port 4433" -a duration:5 -q -z conv,tcp   # bytes that tren day (9 network overhead)
+CERT_SET="mldsa44 mldsa87 rsa3072" FORCE=1 bash scripts/gen_tls_certs.sh
+TLS_CONC=8 TLS_DUR=15 make tls                      # tai nang hon
+\end{lstlisting}
+\textbf{Nghiệm thu x86 (tick đủ mới sang Phần II):} \code{verify_env} PASS · 5 file batch trong \code{data/raw/x86_64} · \code{memory/codesize/liboqs_speed/tls_handshake*} CSV có số · \code{analysis_out/tables.md} + PNG · \code{docs/openssl.commit} (và các .commit khác) tồn tại · \textbf{đã \code{git push}} — số chưa rời máy là số chưa tồn tại.
+
+\newpage
+% =====================================================================
+\section{PHẦN II — THIẾT BỊ 2: ARM Raspberry Pi 4 (aarch64, Ubuntu)}
+
+\subsection{ARM khác x86 ở đâu — lý thuyết bắt buộc trước khi thuê máy}
+\ly{Vì sao phải có máy ARM THẬT}{RQ2 hỏi về hiệu năng \emph{trên SBC} — và hiệu năng là thuộc tính của \emph{phần cứng thật}: cache, pipeline, đơn vị SIMD. Giả lập (QEMU/buildx) cho binary chạy được nhưng \emph{số đo là của trình giả lập}. Cross-compile trên PC cho ra binary ARM nhưng không cho ra con số nào. Kết luận khắc đá: \textbf{số ARM chỉ đến từ máy ARM}; cross/QEMU chỉ là bằng chứng năng lực đóng gói (§7.3).}
+\ly{NEON — ``AVX2 của ARM''}{x86 tăng tốc PQC bằng AVX2 (vector 256-bit); ARM dùng \textbf{NEON} (vector 128-bit, có mặt trên mọi Cortex-A). Phép nhân đa thức NTT trong ML-KEM/ML-DSA vector hóa rất tốt → kỳ vọng speedup ref→opt đáng kể, nhưng \emph{khác} hệ số với x86 (vector hẹp hơn). So \emph{tỉ lệ} speedup hai máy chính là câu trả lời RQ2.}
+\ly{Cortex-A72 KHÔNG có ARM Crypto Extensions}{BCM2711 của Pi 4 thiếu phần cứng AES/SHA chuyên dụng. Hệ quả tốt cho thí nghiệm: cặp ref/opt trên Pi \emph{sạch} — toàn bộ chênh lệch là NEON, không lẫn tăng tốc AES phần cứng. Ghi chi tiết này vào báo cáo khi giải thích số.}
+\ly{Nhiệt — kẻ phá đo thầm lặng}{Pi 4 \emph{throttle} (tự hạ xung) quanh $\sim$80\,°C. Batch đo dài làm nhiệt leo → xung tụt giữa chừng → batch sau chậm hơn batch trước \emph{không phải vì thuật toán}. Đối sách: đọc nhiệt giữa các batch và nghỉ nguội — vòng lệnh ở Bước II.6.}
+\ly{Mạng IPv6-only / NAT64}{Máy Pi hosted (ví dụ Mythic Beasts) thường chỉ có IPv6; truy cập GitHub (IPv4) đi qua NAT64/DNS64 của nhà cung cấp. Clone treo → kiểm \code{cat /etc/resolv.conf} và thử \code{ping6 github.com}. Đây cũng là lý do định luật bằng chứng nghiêm hơn ở Pi: máy thuê có thể bị thu hồi — \textbf{push trước khi rời máy}.}
+
+\subsection{Pipeline ARM — toàn bộ lệnh, theo đúng thứ tự}
+\textbf{II.1 — Lấy repo + cài gói} (lý do từng gói y hệt Bước 1 Phần I):
+\begin{lstlisting}
+git clone <URL-repo> && cd <ten-repo> && chmod +x scripts/*.sh
+bash scripts/install_prereqs.sh
+\end{lstlisting}
+\why{Cùng script chạy được cả hai kiến trúc vì apt tự chọn gói aarch64; \code{linux-tools-\$(uname -r)} trên Pi sẽ ra bản \code{-raspi} — đúng lý do script cài theo \code{uname -r}.}
+
+\textbf{II.2 — Build OpenSSL (khác x86 một cờ):}
+\begin{lstlisting}
+SKIP_TESTS=1 bash scripts/build_openssl.sh
+# (mot lan duy nhat, chay qua dem de lay bang chung: bo SKIP_TESTS)
+\end{lstlisting}
+\why{Pi build chậm (4 nhân A72, RAM 4GB): full test suite có thể thêm hàng giờ. Quy ước: bản dùng hằng ngày \code{SKIP_TESTS=1}; \emph{một} lần qua đêm chạy đủ test làm bằng chứng đúng đắn trên chính kiến trúc này. \code{JOBS} từ versions.env = \code{nproc} = 4 — vừa sức RAM.}
+
+\textbf{II.3 — Kích hoạt + cổng kiểm + harness:}
+\begin{lstlisting}
+source scripts/setenv.sh
+bash scripts/verify_env.sh           # PASS -> docs/env_report_aarch64.txt
+make && make tlsmini tlsclient
+\end{lstlisting}
+\why{\code{verify_env} trên Pi sinh \emph{biên bản riêng của máy này} (\code{_aarch64}) — đề §7.3 đòi tài liệu hóa \emph{từng} nền tảng. \code{bench_evp} tự nhận ARM lúc compile: bộ đếm chu kỳ chuyển từ \code{rdtsc} (x86) sang \code{cntvct} (ARM) — cùng một mã nguồn, hai kiến trúc.}
+
+\textbf{II.4 — liboqs: TRỌNG TÂM của máy này — bắt buộc CẢ HAI cây:}
+\begin{lstlisting}
+bash scripts/build_liboqs.sh ref     # NEON TAT tuong minh
+bash scripts/build_liboqs.sh opt     # NEON BAT (-mcpu=native)
+\end{lstlisting}
+\why{Trên x86 cây opt là ``nên có''; trên ARM nó là \emph{lý do tồn tại của chuyến đo}: cặp ref/opt tại đây = thí nghiệm NEON = RQ2. Khối ARM trong script bật/tắt NEON \emph{tường minh} để hai cây khác đúng một biến. Thiếu một cây → bảng ``ref vs opt (aarch64)'' sẽ \emph{vắng mặt} trong tables.md — checklist cuối phần bắt đúng lỗ hổng này.}
+
+\textbf{II.5 — PQClean hai trục + chứng thư:}
+\begin{lstlisting}
+bash scripts/fetch_pqclean.sh clean
+bash scripts/fetch_pqclean.sh aarch64        # truc NEON thu hai (per-algo .a)
+size ~/pqc/src/PQClean/crypto_kem/ml-kem-768/{clean,aarch64}/lib*.a \
+  | tee data/raw/aarch64/pqclean_neon_size.txt
+bash scripts/gen_tls_certs.sh                # cert sinh LAI tren may nay
+\end{lstlisting}
+\why{\code{aarch64} của PQClean chỉ build được \emph{trên máy ARM} (assembly NTT viết tay — rào chắn trong script chặn từ x86 là vì vậy); cặp clean/aarch64 trả lời ``NEON đổi tốc độ bằng bao nhiêu byte mã''. Chứng thư sinh lại tại chỗ: khóa là tài sản theo máy, không copy chéo.}
+
+\textbf{II.6 — ĐO WP2 với vòng nghỉ-nguội, giải thích TỪNG DÒNG:}
+\begin{lstlisting}
+sudo cpupower frequency-set -g performance              # (1)
+for i in 1 2 3 4 5; do                                   # (2)
+  BENCH_ITERS=1500 make bench                            # (3)
+  cp data/summary_micro_aarch64.csv \
+     data/raw/aarch64/summary_batch$i.csv                # (4)
+  cat /sys/class/thermal/thermal_zone0/temp              # (5)
+  sleep 120                                              # (6)
+done
+\end{lstlisting}
+\begin{enumerate}
+\item Ghim xung — Pi mặc định governor \code{ondemand}; nếu máy thiếu \code{cpupower}: \code{echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor}.
+\item Vẫn K=5 batch như x86 — phương pháp đồng nhất hai máy thì tỉ lệ mới so được.
+\item Vòng \emph{thấp hơn} x86 (1500 vs 5000): batch ngắn → nhiệt leo ít → tránh chạm ngưỡng throttle giữa batch.
+\item Cất bằng chứng batch, y hệt x86.
+\item \textbf{Đọc nhiệt} — giá trị phần nghìn độ C (\code{70000} = 70.0°C); ngưỡng tự đặt: \emph{dưới 70000 mới chạy batch kế}. Nguồn cơ chế: sysfs thermal của kernel.
+\item Nghỉ 2 phút cho tản nhiệt thụ động của Pi hạ nhiệt — đổi thời gian lấy độ tin cậy.
+\end{enumerate}
+
+\textbf{II.7 — WP5 + WP3 + WP4 (lệnh y hệt x86, khác chỗ nào ghi chú đó):}
+\begin{lstlisting}
+make memory && make codesize
+bash scripts/run_liboqs_speed.sh        # can DU ref+opt -> 12 thuat toan x 2 variant
+bash scripts/build_nginx.sh             # Pi ~5-10 phut (KHONG rebuild OpenSSL - link dong)
+make tls                                # phuong an A
+bash scripts/bench_tls_nginx.sh         # phuong an B (TLS_ITERS=30 neu muon ngan)
+./build/tls_mini_server ~/pqc/tls/mldsa65.cert.pem ~/pqc/tls/mldsa65.key.pem 9443 \
+   | tee data/raw/aarch64/tlsmini_handshakes.csv &
+./build/tls_timer_client 127.0.0.1 9443 X25519MLKEM768 50 ~/pqc/tls/mldsa65.cert.pem
+make analyze
+\end{lstlisting}
+\why{Mọi script tự nhận \code{uname -m} → file ra mang đuôi \code{aarch64}, không đè số x86. \code{analyze} chạy trên máy nào cũng được — nhưng để bảng \emph{Cross-platform ratio} xuất hiện, thư mục \code{data/} phải chứa CSV của \emph{cả hai} máy (kéo về một chỗ qua git là cách chuẩn).}
+
+\textbf{II.8 — PUSH TRƯỚC KHI RỜI MÁY (định luật bằng chứng, phiên bản nghiêm):}
+\begin{lstlisting}
+git add data analysis_out docs && git commit -m "aarch64 measurements" && git push
+\end{lstlisting}
+\why{Máy thuê có thể bị thu hồi/reimage bất kỳ lúc nào — số chưa push là số sẽ biến mất. Push xong mới được phép tắt phiên SSH.}
+
+\subsection{Cross-compile từ x86 — bằng chứng năng lực (KHÔNG phải nguồn số)}
+\begin{lstlisting}
+sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu   # tren PC x86
+bash scripts/cross_build_liboqs.sh
+file ~/pqc/liboqs-aarch64-cross/lib/liboqs.so*   # phai in: ARM aarch64
+\end{lstlisting}
+\lam{Build liboqs \emph{cho ARM} ngay trên PC, dùng \code{cmake/aarch64-toolchain.cmake}. Giải thích từng dòng toolchain:}
+\begin{itemize}
+\item \code{CMAKE_SYSTEM_NAME Linux} + \code{CMAKE_SYSTEM_PROCESSOR aarch64} — khai ``đích là Linux/ARM64'': CMake chuyển sang chế độ cross.
+\item \code{CMAKE_C(XX)_COMPILER aarch64-linux-gnu-gcc/g++} — dùng compiler chéo của Ubuntu.
+\item Bộ tứ \code{FIND_ROOT_PATH_MODE}: \code{PROGRAM=NEVER} (công cụ chạy lúc build vẫn là đồ host), \code{LIBRARY/INCLUDE/PACKAGE=ONLY} (thư viện/header \emph{chỉ} tìm trong sysroot đích — cấm link nhầm lib x86). Khuôn theo \code{cmake-toolchains(7)} và soi gương file mẫu liboqs ship sẵn (\code{.CMake/toolchain_rasppi.cmake} — bản của họ là armhf/gcc-8 32-bit, bản ta là aarch64 hiện đại).
+\item Script truyền thêm \code{-DOQS_USE_OPENSSL=OFF} — host không có OpenSSL bản ARM để link.
+\end{itemize}
+\why{Vai trò duy nhất: đề §7.3 đòi ``separate cross-compile scripts (aarch64-linux-gnu toolchain)'' — đây là bằng chứng \emph{biết đóng gói cho ARM}; binary sinh ra là generic ARM, \textbf{không bao giờ} là nguồn số đo. Đã kiểm sống: cross-configure nhận GNU 13.3.0 aarch64, ``Configuring done'', 0 cảnh báo.}
+
+\subsection{Tùy chọn ARM}
+\begin{lstlisting}
+USE_ARM_PMU=1 FORCE=1 bash scripts/build_liboqs.sh opt   # CHI sau khi nap module pqax
+FORCE=1 bash scripts/build_openssl.sh                    # full test qua dem (1 lan)
+\end{lstlisting}
+\why{PMU (Performance Monitoring Unit) cho liboqs đọc chu kỳ \emph{chính xác mức phần cứng}, nhưng cần nạp kernel module (dự án pqax) và \emph{nhiều cloud không expose PMU} — vì vậy là tùy chọn; thiếu nó \code{speed_*} vẫn báo thời gian tường (đủ cho RQ2).}
+
+\textbf{Nghiệm thu ARM:} 5 batch + log nhiệt · \code{liboqs_speed_aarch64.csv} đủ \emph{cả ref+opt} · memory/codesize CSV · pqclean clean+aarch64 size · \code{tls_handshake_aarch64.csv} (+ bản nginx) · tlsmini CSV · \code{env_report_aarch64.txt} · \textbf{đã push}.
+
+\newpage
+% =====================================================================
+\section{PHẦN III — Sau khi có số ở cả hai máy: tổng hợp, báo cáo, demo}
+\begin{lstlisting}
+git pull && make analyze     # gop CSV hai may -> bang Cross-platform ratio xuat hien
+cd docs/report && xelatex main.tex && xelatex main.tex   # bao cao (maybefig tu hien hinh)
+bash scripts/demo.sh         # quay man hinh ~2 phut (Deliverable 5)
+\end{lstlisting}
+\why{Đọc bảng ratio đúng cách: \emph{không} kết luận ``ARM chậm hơn x86 N lần là tính chất của PQC'' (đó là tính chất của hai CPU); câu trả lời RQ2 nằm ở so sánh \textbf{speedup ref→opt} của hai máy — nếu NEON kéo được hệ số tương đương AVX2, giả thuyết ``tối ưu phần mềm đưa PQC về mức khả thi trên SBC'' đứng vững. \textbf{Đo qua LAN} (mở rộng RQ3): máy server bật \code{BIND_ALL=1} (server tự viết) hoặc \code{__LISTEN__=0.0.0.0} (nginx) + mở firewall \code{sudo ufw allow 8443/tcp}; máy client copy \emph{cert public} sang (\code{scp ...cert.pem}) rồi \code{tls_timer_client <IP-server> 8443 <group> 50 cert.pem} — chênh lệch với số loopback = chi phí mạng thật, nơi ClientHello $\sim$1KB của ML-KEM có thể lộ chuyện phân mảnh gói.}
+
+% =====================================================================
+\appendix
+\section{Phụ lục A — Bản đồ 51 file: mỗi file một dòng công dụng}
+\begin{longtable}{p{0.36\linewidth}p{0.58\linewidth}}
+\toprule \textbf{File} & \textbf{Công dụng}\\\midrule
+\code{Makefile} & công tắc tổng 8 target; tự dò lib/lib64; fail-to-be-loud khi thiếu OpenSSL\\
+\code{README.md} & cửa chính: quickstart 2 máy, bảng chọn phương án, bảng biến env, nghiệm thu\\
+\code{.gitignore} & chặn build/, nguồn bên thứ ba, *.key(.pem); \emph{không} chặn data/ và analysis\_out/ (deliverable)\\
+\code{src/bench_evp.cpp} & harness WP2: EVP, 12 thuật toán, CLOCK\_MONOTONIC\_RAW + cycles, 4 biến env\\
+\code{src/tls_mini_server.c} & server HTTPS tự viết: TLS1.3-only, đo SSL\_accept phía server, in group, BIND\_ALL\\
+\code{src/tls_timer_client.c} & client đo tự viết: lặp SSL\_connect trong-tiến-trình, CSV + median, ép group\\
+\code{scripts/versions.env} & ghim mọi tag + prefix (một nguồn sự thật)\\
+\code{scripts/setenv.sh} & kích hoạt môi trường (source!); no-rpath + LD\_LIBRARY\_PATH\\
+\code{scripts/install_prereqs.sh} & ba đợt gói ánh xạ §8.2/§7.4/§16; cố ý loại libssl-dev\\
+\code{scripts/build_openssl.sh} & nền móng 3.6.2; install\_ssldirs; test suite; openssl.commit\\
+\code{scripts/verify_env.sh} & cổng chặn + biên bản env\_report\_<arch>\\
+\code{scripts/build_liboqs.sh} & hai cây ref/opt — thí nghiệm RQ2; USE\_ARM\_PMU\\
+\code{scripts/fetch_pqclean.sh} & .a per-algorithm; ghim commit; rào chắn chéo kiến trúc\\
+\code{scripts/build_oqsprovider.sh} & provider kế nhiệm fork; OPENSSL\_ROOT\_DIR+liboqs\_DIR\\
+\code{scripts/cross_build_liboqs.sh} & cross aarch64 trên x86 — bằng chứng §7.3\\
+\code{cmake/aarch64-toolchain.cmake} & toolchain cross theo cmake-toolchains(7), soi gương mẫu liboqs\\
+\code{scripts/docker_buildx.sh} + \code{docker/Dockerfile.x86_64} & đóng hộp tái lập; image tự-fail qua verify\_env; QEMU không đo\\
+\code{scripts/run_micro.sh} & quét 12 thuật toán → summary\_micro (long format) + raw\\
+\code{scripts/measure_memory.sh} & peak RSS qua GNU time -v\\
+\code{scripts/measure_codesize.sh} & text/data/bss qua size; CODESIZE\_LIBS\\
+\code{scripts/run_liboqs_speed.sh} & WP3 runner: 2 cây × 6 thuật toán → CSV + raw evidence\\
+\code{scripts/gen_tls_certs.sh} & 3 cert tự ký (CERT\_SET mở rộng); genpkey 2 bước; khóa ngoài repo\\
+\code{scripts/bench_tls.sh} & WP4-A: s\_server; latency tuần tự + bão song song; NA khi fail\\
+\code{scripts/build_nginx.sh} & WP4-B: nginx 1.30.2 link động OpenSSL ta; chốt chặn nginx -V\\
+\code{scripts/nginx_bench.conf} & template đo (từng dòng ở Bước 13); placeholder \_\_LISTEN\_\_ cho LAN\\
+\code{scripts/bench_tls_nginx.sh} & ma trận 18 ô (workers×cert×group) → CSV nhãn nginx\\
+\code{scripts/analyze.py} & gom mọi CSV → tables.md + PNG; ratio 2 máy; speedup WP3\\
+\code{scripts/demo.sh} & Deliverable 5: 3 màn quay ~2 phút\\
+\code{scripts/init_repo.sh/.ps1} & tiện ích khởi tạo repo hai hệ điều hành\\
+\code{docs/KICH_BAN_TRIEN_KHAI.md} & kịch bản đo đầy đủ 2 máy + checklist\\
+\code{docs/THIET_KE_CHI_TIET.md} & hồ sơ thiết kế: mọi quyết định + nhật ký bằng chứng 10 mục\\
+\code{docs/report/main.tex} & khung báo cáo XeLaTeX, 9 nguồn kiểm sống, maybefig\\
+\code{docs/WP1_*} & tra cứu nhanh môi trường + bản in PDF\\
+\code{data/, analysis_out/} & số + bảng/hình — \emph{được commit} (deliverable §11.4)\\
+\bottomrule
+\end{longtable}
+
+\section{Phụ lục B — Toàn bộ biến môi trường (không hardcode)}
+Cú pháp: đặt trước lệnh — \code{TLS_ITERS=100 TLS_CONC=8 make tls}; cả \code{make bench BENCH_ITERS=5000} cũng tới đích (đã test sống). WP2: \code{BENCH_ITERS} 2000 · \code{BENCH_KEYGEN_ITERS} 50 (RSA/EC) / 200 (PQC — keygen nhanh nên cần nhiều mẫu) · \code{BENCH_WARMUP} 20 · \code{BENCH_CSV} đường dẫn mẫu thô. WP4: \code{TLS_ITERS} 50 · \code{TLS_WARMUP} 5 · \code{TLS_CONC} 4 · \code{TLS_DUR} 10 · \code{PORT} 4433/8443 · \code{CERTS} · \code{GROUP_LIST} · (nginx) \code{WORKERS_LIST} "1 auto". Cert: \code{CERT_SET} · \code{FORCE}. WP3: \code{KEMS} · \code{SIGS}. WP5: \code{CODESIZE_LIBS}. Server tự viết: \code{TLS_GROUPS} (fail-loudly) · \code{BIND_ALL=1} (LAN). Build: \code{FORCE=1} (openssl/liboqs/nginx/certs) · \code{SKIP_TESTS=1} · \code{USE_ARM_PMU=1} · \code{JOBS}. \emph{Cố ý đứng yên}: ma trận 12 thuật toán trong run\_micro/measure\_memory — đó là hằng số thí nghiệm §7.1, đổi nó là đổi thiết kế nghiên cứu; đo lẻ đã có \code{./build/bench_evp mlkem 768}.
+
+\section{Phụ lục C — FAQ ``tại sao'' cho người mới (12 câu hay gặp nhất)}
+\begin{enumerate}
+\item \emph{Sao không \code{apt install nginx} cho nhanh?} — nginx của apt link OpenSSL 3.0 hệ thống: không có ML-KEM; sửa config kiểu gì cũng chết ở \code{SSL_CTX_set1_curves_list failed} vì lỗi nằm ở \emph{thư viện bên dưới}.
+\item \emph{Sao phải hai máy thật?} — hiệu năng là thuộc tính phần cứng; RQ1/RQ2 hỏi về hai lớp phần cứng khác nhau.
+\item \emph{Sao không so thẳng số x86 với số ARM?} — định luật bốn-con-số: khác máy chỉ so tỉ lệ.
+\item \emph{Median hơn gì mean?} — miễn nhiễm vài vòng đột biến (nhiễu hệ điều hành); mean bị một outlier kéo lệch.
+\item \emph{Warm-up để làm gì?} — vòng đầu cache lạnh: bằng chứng sống conn\#1 7996µs vs \#2--3 $\sim$3800µs.
+\item \emph{Sao phải tắt session resumption khi đo TLS?} — không tắt thì từ kết nối 2 là handshake rút gọn, mất phần truyền cert — đúng phần PQC khác biệt nhất.
+\item \emph{Copy cert sang máy client là trusted hay untrusted?} — là \emph{biến} untrusted thành trusted có kiểm soát: bạn tự đóng vai CA cho phòng lab; chỉ copy \code{.cert.pem} (công khai), không bao giờ \code{.key.pem}.
+\item \emph{Client có gửi cert cho server không?} — Không (TLS một chiều như mọi web); chiều cert là server→client; hai chiều là mTLS — chế độ đặc biệt, ngoài phạm vi.
+\item \emph{``Tự triển khai'' mà vẫn \#include openssl — có gian không?} — Không: tự sở hữu TCP + HTTP + luồng điều khiển + điểm đo; phần giao thức TLS thuê libssl là \emph{bắt buộc đúng đắn} (đừng tự chế crypto) — nginx cũng vậy.
+\item \emph{Ba server A/B/C có thừa không?} — ba tầng cô lập: mật mã thuần → +vỏ server thật/đa lõi → +điểm đo phía server; ba số kể một chuyện thì kết luận vững gấp ba.
+\item \emph{Sao mọi thứ ghim phiên bản mà không lấy bản mới nhất?} — ``mới nhất'' hôm nay ≠ ngày mai → không tái lập; tag bất biến; đổi phiên bản là quyết định có hồ sơ (sửa versions.env).
+\item \emph{Số đo xong để trên máy được không?} — Không, nhất là máy thuê: chưa push = chưa tồn tại.
+\end{enumerate}
+
+\section*{Nguồn tổng (mọi link đã kiểm trong quá trình xây repo)}
+\begin{itemize}
+\item OpenSSL docs 3.5: EVP\_PKEY-ML-KEM / EVP\_PKEY-ML-DSA / SSL\_CTX\_set1\_groups\_list — \url{https://docs.openssl.org/3.5/}; demos chính chủ (sslecho, guide/tls-server-block.c) — \url{https://github.com/openssl/openssl/tree/master/demos}
+\item Chuẩn: FIPS 203 / FIPS 204 / SP 800-57 — \url{https://csrc.nist.gov/}
+\item liboqs \url{https://github.com/open-quantum-safe/liboqs} · oqs-provider \url{https://github.com/open-quantum-safe/oqs-provider} · oqs-demos \url{https://github.com/open-quantum-safe/oqs-demos} · profiling (archived, phương pháp) \url{https://github.com/open-quantum-safe/profiling} · PQClean \url{https://github.com/PQClean/PQClean} · pqm4 \url{https://github.com/mupq/pqm4}
+\item nginx: mirror nguồn \url{https://github.com/nginx/nginx} · module SSL \url{https://nginx.org/en/docs/http/ngx_http_ssl_module.html} · ticket \#2542 (bẫy default-server)
+\item Học thuật: Paquin–Stebila–Tamvada, \emph{Benchmarking post-quantum cryptography in TLS} — \url{https://eprint.iacr.org/2019/1447}; mã \url{https://github.com/xvzcf/pq-tls-benchmark}
+\item Kernel cpufreq/thermal sysfs — \url{https://www.kernel.org/doc/html/latest/admin-guide/pm/cpufreq.html}; Docker multi-platform — \url{https://docs.docker.com/build/building/multi-platform/}
+\end{itemize}
+
+\end{document}
