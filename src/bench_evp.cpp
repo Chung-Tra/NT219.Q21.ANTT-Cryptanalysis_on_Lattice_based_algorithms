@@ -1,27 +1,27 @@
 // ============================================================================
-// bench_evp.cpp  —  Microbenchmark cryptographic primitives bang OpenSSL 3.x EVP (NT219)
+// bench_evp.cpp  —  Microbenchmark cryptographic primitives via OpenSSL 3.x EVP (NT219)
 //
 //   ./build/bench_evp <family> <param>
 //   family: rsa | ecdsa | ecdh | mlkem | mldsa
-//   vd: ./build/bench_evp rsa 2048      ./build/bench_evp ecdsa p256
-//       ./build/bench_evp mlkem 768     ./build/bench_evp mldsa 65   (can OpenSSL >= 3.5)
+//   e.g.: ./build/bench_evp rsa 2048      ./build/bench_evp ecdsa p256
+//         ./build/bench_evp mlkem 768     ./build/bench_evp mldsa 65   (needs OpenSSL >= 3.5)
 //
-// Method (microbenchmark): voi MOI operation, chay N iterations (lay tu env),
-// do CA wall-clock (ns, clock_gettime CLOCK_MONOTONIC_RAW) LAN cycles (rdtsc/cntvct),
-// roi tinh median / mean / std / p95 / p99 / 95% CI. So iterations = ENV VAR:
-//   BENCH_ITERS        (default 2000)  -- iterations cho op nhanh
-//   BENCH_KEYGEN_ITERS (default 50)    -- keygen cham nen it iterations hon
-//   BENCH_WARMUP       (default 20)    -- iterations warm-up bi loai (cache/lazy-init)
-//   BENCH_CSV=path                      -- neu set, ghi raw samples ra CSV
-// Command-line args KHONG can recompile -> reproducible, ghi env vao ket qua.
+// Method (microbenchmark): for EACH operation, run N iterations (from env),
+// measure BOTH wall-clock (ns, clock_gettime CLOCK_MONOTONIC_RAW) AND cycles (rdtsc/cntvct),
+// then compute median / mean / std / p95 / p99 / 95% CI. Iteration count = ENV VARS:
+//   BENCH_ITERS        (default 2000)  -- iterations for fast ops
+//   BENCH_KEYGEN_ITERS (default 50)    -- keygen is slow so fewer iterations
+//   BENCH_WARMUP       (default 20)    -- warm-up iterations discarded (cache/lazy-init)
+//   BENCH_CSV=path                      -- if set, write raw samples to CSV
+// Command-line args need NO recompile -> reproducible, env recorded in results.
 //
-// Build (KHUYEN NGHI dung Makefile, KHONG go g++ tay):
-//   make                              # OpenSSL system
-//   make OSSLROOT=/opt/openssl-3.6.2  # OpenSSL self-built (PQC native)
+// Build (RECOMMENDED to use the Makefile, do NOT run g++ by hand):
+//   make                              # system OpenSSL
+//   make OSSLROOT=/pqc/openssl        # self-built OpenSSL (PQC native)
 //
-// NOTE: chi dung OpenSSL (link -lcrypto). KHONG #include <cryptopp/...>,
-// KHONG link -lcryptopp. Generate key co the dung tool Crypto++ cua thay (file PEM
-// interoperable); harness NAY chi do bang OpenSSL EVP de so sanh fair.
+// NOTE: use OpenSSL only (link -lcrypto). Do NOT #include <cryptopp/...>,
+// do NOT link -lcryptopp. Keys may be generated with the professor's Crypto++ tool
+// (PEM interoperable); THIS harness only measures via OpenSSL EVP for a fair comparison.
 // ============================================================================
 
 #include <openssl/evp.h>
@@ -46,7 +46,7 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// Clock: wall-clock (ns) va cycle counter.
+// Clock: wall-clock (ns) and cycle counter.
 // ---------------------------------------------------------------------------
 static inline uint64_t now_ns() {
     struct timespec ts;
@@ -54,9 +54,9 @@ static inline uint64_t now_ns() {
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-// Tra ve "cycles". x86: TSC (rdtscp). aarch64: CNTVCT_EL0 — la VIRTUAL TIMER
-// fixed-frequency, KHONG phai core cycle that; muon cycle chinh xac tren Pi can
-// PMU (kernel module, xem CONFIGURE liboqs). Bao cao wall-ns la chinh, cycles phu.
+// Return "cycles". x86: TSC (rdtscp). aarch64: CNTVCT_EL0 — a VIRTUAL TIMER
+// at fixed frequency, NOT a true core cycle; for accurate cycles on the Pi you need
+// the PMU (kernel module, see CONFIGURE liboqs). wall-ns is primary, cycles secondary.
 static inline uint64_t read_cycles() {
 #if defined(__x86_64__) || defined(__i386__)
     unsigned int aux;
@@ -73,7 +73,7 @@ static inline uint64_t read_cycles() {
 }
 
 // ---------------------------------------------------------------------------
-// Bao error tu OpenSSL roi thoat.
+// Report the OpenSSL error then exit.
 // ---------------------------------------------------------------------------
 [[noreturn]] static void fatal(const char *msg) {
     fprintf(stderr, "LOI: %s\n", msg);
@@ -82,7 +82,7 @@ static inline uint64_t read_cycles() {
 }
 
 // ---------------------------------------------------------------------------
-// Statistics tu mot vector samples.
+// Statistics from a sample vector.
 // ---------------------------------------------------------------------------
 struct Stats {
     size_t n = 0;
@@ -112,7 +112,7 @@ static Stats compute_stats(std::vector<double> v) {
         double acc = 0.0;
         for (double x : v) acc += (x - s.mean) * (x - s.mean);
         s.sd = std::sqrt(acc / (double)(v.size() - 1));   // sample std (ddof=1)
-        // 95% CI cua MEAN (normal approximation): mean +/- 1.96 * sd/sqrt(n)
+        // 95% CI of the MEAN (normal approximation): mean +/- 1.96 * sd/sqrt(n)
         double half = 1.96 * s.sd / std::sqrt((double)v.size());
         s.ci_lo = s.mean - half;
         s.ci_hi = s.mean + half;
@@ -123,7 +123,7 @@ static Stats compute_stats(std::vector<double> v) {
 }
 
 // ---------------------------------------------------------------------------
-// Lay iterations tu env (default fallback).
+// Get iteration count from env (default fallback).
 // ---------------------------------------------------------------------------
 static size_t env_size(const char *name, size_t dflt) {
     const char *s = getenv(name);
@@ -137,8 +137,8 @@ static FILE *g_csv = nullptr;
 static std::string  g_algo;
 
 // ---------------------------------------------------------------------------
-// Runner: do mot op qua N iterations + warmup, in key-value, ghi CSV neu can.
-//   fn() thuc hien DUNG MOT operation (fatal neu error).
+// Runner: measure one op over N iterations + warmup, print key-value, write CSV if set.
+//   fn() performs EXACTLY ONE operation (fatal on error).
 // ---------------------------------------------------------------------------
 static void run_op(const char *op, size_t iters, size_t warmup,
                    const std::function<void()> &fn) {
@@ -160,7 +160,7 @@ static void run_op(const char *op, size_t iters, size_t warmup,
     Stats w = compute_stats(wall);
     Stats c = compute_stats(cyc);
 
-    // --- in key-value (separator ": ", compatible analyze.py) ---
+    // --- print key-value (separator ": ", compatible with analyze.py) ---
     printf("%s-iters: %zu\n", op, iters);
     printf("%s-wall-median-ns: %.1f\n", op, w.median);
     printf("%s-wall-mean-ns: %.1f\n",   op, w.mean);
@@ -187,7 +187,7 @@ static void bench_rsa(int bits) {
     printf("algo: %s\n", g_algo.c_str());
     printf("key-size: %d\n", bits);
 
-    // ---- keygen (tai su dung gctx; moi iteration sinh + free 1 key) ----
+    // ---- keygen (reuse gctx; each iteration generates + frees 1 key) ----
     {
         EVP_PKEY_CTX *gctx = EVP_PKEY_CTX_new_from_name(nullptr, "RSA", nullptr);
         if (!gctx) fatal("RSA CTX_new_from_name");
@@ -201,7 +201,7 @@ static void bench_rsa(int bits) {
         EVP_PKEY_CTX_free(gctx);
     }
 
-    // Sinh 1 fixed key dung cho cac op con lai
+    // Generate 1 fixed key for the remaining ops
     EVP_PKEY *pkey = nullptr;
     {
         EVP_PKEY_CTX *gctx = EVP_PKEY_CTX_new_from_name(nullptr, "RSA", nullptr);
@@ -211,8 +211,8 @@ static void bench_rsa(int bits) {
         EVP_PKEY_CTX_free(gctx);
     }
 
-    std::vector<unsigned char> tbs(32, 0x5A);   // gia lap digest SHA-256
-    std::vector<unsigned char> msg(32, 0xA5);   // plaintext ngan cho OAEP
+    std::vector<unsigned char> tbs(32, 0x5A);   // emulate a SHA-256 digest
+    std::vector<unsigned char> msg(32, 0xA5);   // short plaintext for OAEP
 
     // ---- PSS sign ----
     std::vector<unsigned char> sig;
@@ -223,19 +223,19 @@ static void bench_rsa(int bits) {
             || EVP_PKEY_CTX_set_rsa_padding(sctx, RSA_PKCS1_PSS_PADDING) <= 0
             || EVP_PKEY_CTX_set_signature_md(sctx, EVP_sha256()) <= 0)
             fatal("PSS sign init");
-        // siglen la size_t* (in/out): goi sig=NULL de lay length
+        // siglen is size_t* (in/out): call with sig=NULL to get the length
         if (EVP_PKEY_sign(sctx, nullptr, &siglen, tbs.data(), tbs.size()) <= 0)
             fatal("PSS sign len");
         sig.resize(siglen);
         run_op("pss-sign", iters, warmup, [&]() {
-            size_t outl = sig.size();              // in/out moi iteration
+            size_t outl = sig.size();              // in/out each iteration
             if (EVP_PKEY_sign(sctx, sig.data(), &outl, tbs.data(), tbs.size()) <= 0)
                 fatal("PSS sign");
         });
         EVP_PKEY_CTX_free(sctx);
     }
 
-    // ---- PSS verify ----  (note: siglen la VALUE, khong dung &)
+    // ---- PSS verify ----  (note: siglen is a VALUE, do not use &)
     {
         EVP_PKEY_CTX *vctx = EVP_PKEY_CTX_new_from_pkey(nullptr, pkey, nullptr);
         if (!vctx || EVP_PKEY_verify_init(vctx) <= 0
@@ -292,7 +292,7 @@ static void bench_rsa(int bits) {
 // ECDSA / ECDH  (curve: "P-256" | "P-384" | "P-521")
 // ===========================================================================
 static EVP_PKEY *ec_gen(const char *curve) {
-    EVP_PKEY *k = EVP_EC_gen(curve);   // helper 3.0+: sinh EC key theo ten curve
+    EVP_PKEY *k = EVP_EC_gen(curve);   // 3.0+ helper: generate an EC key by curve name
     if (!k) fatal("EVP_EC_gen");
     return k;
 }
@@ -326,7 +326,7 @@ static void bench_ecdsa(const char *curve) {
             size_t outl = sig.size();
             if (EVP_PKEY_sign(sctx, sig.data(), &outl, tbs.data(), tbs.size()) <= 0)
                 fatal("ECDSA sign");
-            siglen = outl;   // signature length ECDSA thay doi (DER) -> cap nhat cho verify
+            siglen = outl;   // ECDSA signature length varies (DER) -> update for verify
         });
         EVP_PKEY_CTX_free(sctx);
     }
@@ -406,7 +406,7 @@ static void bench_mlkem(const char *name) {   // name vd "ML-KEM-768"
 
     EVP_PKEY *kp = pqc_gen(name);
 
-    // encaps: lay size truoc (NULL), roi loop
+    // encaps: get the size first (NULL), then loop
     EVP_PKEY_CTX *ectx = EVP_PKEY_CTX_new_from_pkey(nullptr, kp, nullptr);
     if (!ectx || EVP_PKEY_encapsulate_init(ectx, nullptr) <= 0) fatal("encaps init");
     size_t wlen = 0, klen = 0;
@@ -455,7 +455,7 @@ static void bench_mldsa(const char *name) {    // name vd "ML-DSA-65"
     std::vector<unsigned char> msg(64, 0x5A);
     std::vector<unsigned char> sig;
     size_t siglen = 0;
-    // ML-DSA la "pure" signature: sign_message_init (md default = NULL).
+    // ML-DSA is a "pure" signature: sign_message_init (implicit md = NULL).
     {
         EVP_PKEY_CTX *sctx = EVP_PKEY_CTX_new_from_pkey(nullptr, kp, nullptr);
         if (!sctx || EVP_PKEY_sign_message_init(sctx, sig_alg, nullptr) <= 0)
@@ -464,7 +464,7 @@ static void bench_mldsa(const char *name) {    // name vd "ML-DSA-65"
             fatal("ML-DSA sign len");
         sig.resize(siglen);
         run_op("sign", iters, warmup, [&]() {
-            // rejection sampling -> phai re-init moi iteration (theo mau OpenSSL)
+            // rejection sampling -> must re-init each iteration (per the OpenSSL sample)
             size_t outl = sig.size();
             if (EVP_PKEY_sign_message_init(sctx, sig_alg, nullptr) <= 0
                 || EVP_PKEY_sign(sctx, sig.data(), &outl, msg.data(), msg.size()) <= 0)
@@ -511,16 +511,16 @@ static std::string curve_of(const std::string &p) {
 }
 
 // ===========================================================================
-// [ADDED] Do SIZE (bytes): public key, private key, ciphertext (KEM),
-// signature. Day la mat "bandwidth / network overhead" cua RQ1, bo
-// sung cho phan do TIME o tren. KHONG do time — chi truy van length.
+// [ADDED] Measure SIZE (bytes): public key, private key, ciphertext (KEM),
+// signature. This is the "bandwidth / network overhead" side of RQ1, complementing
+// the TIME measurement above. Does NOT measure time — only queries lengths.
 //   - size-key-bits        : RSA = modulus bits, EC = field bits.
-//   - size-pubkey/privkey  : RAW length (qua OSSL_PKEY_PARAM_PUB_KEY/PRIV_KEY)
-//                            khi provider ho tro (EC, ML-KEM, ML-DSA); RSA bo qua.
+//   - size-pubkey/privkey  : RAW length (via OSSL_PKEY_PARAM_PUB_KEY/PRIV_KEY)
+//                            when the provider supports it (EC, ML-KEM, ML-DSA); RSA skipped.
 //   - size-signature       : EVP_PKEY_get_size = max signature
 //                            (RSA-PSS = modulus bytes; ECDSA = max DER; ML-DSA).
-//   - size-ciphertext/shared: lay tu encapsulate(NULL) cho KEM (exact).
-// Tao key MOI rieng cho phep do nay; in key-value "size-...: N".
+//   - size-ciphertext/shared: from encapsulate(NULL) for the KEM (exact).
+// Generate a fresh key just for this measurement; print key-value "size-...: N".
 // ===========================================================================
 static void report_pkey_sizes(EVP_PKEY *pkey) {
     if (!pkey) return;
@@ -549,7 +549,7 @@ static void report_sizes(const std::string &fam, const std::string &param) {
         }
         if (k) {
             report_pkey_sizes(k);
-            // RSA-PSS: signature length = so byte cua modulus.
+            // RSA-PSS: signature length = modulus size in bytes.
             printf("size-signature-bytes: %d\n", EVP_PKEY_get_size(k));
         }
     } else if (fam == "ecdsa" || fam == "ecdh") {
@@ -558,7 +558,7 @@ static void report_sizes(const std::string &fam, const std::string &param) {
         if (k) {
             report_pkey_sizes(k);
             if (fam == "ecdsa")
-                // ECDSA: signature DER, day la MAX size.
+                // ECDSA: DER signature, this is the MAX size.
                 printf("size-signature-max-bytes: %d\n", EVP_PKEY_get_size(k));
         }
     }
@@ -585,7 +585,7 @@ static void report_sizes(const std::string &fam, const std::string &param) {
         if (g) { EVP_PKEY_keygen_init(g); EVP_PKEY_generate(g, &k); EVP_PKEY_CTX_free(g); }
         if (k) {
             report_pkey_sizes(k);
-            // ML-DSA: signature size (max theo tham so).
+            // ML-DSA: signature size (max for the parameter set).
             printf("size-signature-bytes: %d\n", EVP_PKEY_get_size(k));
         }
     }
@@ -636,7 +636,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // [ADDED] Sau khi do time xong, do them SIZE (bytes) cua thuat toan.
+    // [ADDED] After timing, also measure the algorithm's SIZE (bytes).
     report_sizes(fam, param);
 
     if (g_csv) fclose(g_csv);
