@@ -165,7 +165,7 @@ governor tiết kiệm điện làm hai lần đo ra hai số khác nhau.
 ```sh
 sudo cpupower frequency-set -g performance   # VM/container khong co cpufreq -> bo qua (env_report ghi 'unavailable')
 for i in 1 2 3 4 5; do
-  BENCH_WARMUP=50 BENCH_ITERS=5000 make bench
+  BENCH_WARMUP=50 BENCH_ITERS=5000 BENCH_KEYGEN_ITERS=50 make bench
   cp data/summary_micro_x86_64.csv data/raw/x86_64/summary_batch$i.csv
   # GIU raw+kv tung thuat toan THEO batch (neu khong, batch sau GHI DE batch truoc):
   for f in data/raw/x86_64/*.raw.csv; do
