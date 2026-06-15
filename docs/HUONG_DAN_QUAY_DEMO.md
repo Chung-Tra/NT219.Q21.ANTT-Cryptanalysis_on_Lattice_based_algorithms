@@ -238,7 +238,7 @@ mới biết RSS. `libcrypto.so` trộn mọi thuật toán nên **per-algorithm
 từ PQClean** (mỗi scheme một file `.a`).
 **Lệnh quay:**
 ```sh
-make memory      # -> data/memory_x86_64.csv (algo, peak_rss_kb) -- 12 algo (subset cua 15 algo WP2)
+make memory      # -> data/memory_x86_64.csv (algo, peak_rss_kb) -- 15 algo (KHOP run_micro.sh; da sua tu 12)
 make codesize    # -> data/codesize_x86_64.csv (file,text,data,bss,total)
 bash scripts/fetch_pqclean.sh clean
 # per-scheme code size = TONG cac object trong .a -> them '-t' de lay thang dong (TOTALS):
@@ -250,11 +250,15 @@ done | tee data/raw/x86_64/pqclean_clean_size.txt
 - **Code size — per-algorithm (số đáng tin):** `size` trên `.a` in TỪNG object nên phải
   cộng lại; thêm `-t` để lấy thẳng dòng tổng:
   `size -t ~/pqc/src/PQClean/crypto_kem/ml-kem-768/clean/libml-kem-768_clean.a | tail -1`
-  (dòng `(TOTALS)` = tổng text/data/bss của cả scheme).
+  (dòng `(TOTALS)` = tổng text/data/bss của cả scheme). File `pqclean_*_size.txt` (lệnh
+  `tee` ở trên) giờ **được `analyze.py` đọc** thành bảng `PQClean per-scheme code size`
+  (clean vs avx2/aarch64) trong `tables.md` — xem §4.9.
 - **Code size — thư viện trộn (chỉ tham khảo):** `size ~/pqc/openssl/lib*/libcrypto.so`
-  (≈6.5 MB, đúng). ⚠ Cột `libcrypto.a` trong `codesize_*.csv` KHÔNG đáng tin: script đọc
-  `awk 'NR==2'` nên với `.a` (kho nhiều object) chỉ lấy object ĐẦU chứ không phải tổng —
-  bỏ qua dòng đó, chỉ tin `libcrypto.so`.
+  (≈6.5 MB, đúng). ✅ Cột `libcrypto.a` trong `codesize_*.csv` **giờ đã đúng tổng**: đã
+  sửa `measure_codesize.sh` từ `awk 'NR==2'` (chỉ lấy object ĐẦU → ra 2653 B) sang
+  `size -t … | tail -1` (dòng `(TOTALS)` = tổng thật, chạy kiểm: **5,562,256 B ≈ 5.56 MB**).
+  Lưu ý: `libcrypto.a/.so` vẫn là **thư viện trộn** mọi thuật toán, nên số **per-algorithm
+  chỉ tin từ PQClean** (`size -t` trên `.a` từng scheme ở trên).
 - **Memory (peak RSS):** chạy **tay** đúng lệnh mà `make memory` bọc, rồi so dòng
   "Maximum resident set size" với cột `peak_rss_kb`:
   ```sh
@@ -264,10 +268,11 @@ done | tee data/raw/x86_64/pqclean_clean_size.txt
   ⚠ `/usr/bin/time` đến từ gói `time` (Ubuntu: `sudo apt install time`). Gói này nằm
   ở **đợt cài “không bắt buộc”** của `install_prereqs.sh` nên có thể vắng — thiếu nó
   `make memory` báo `Need GNU time at /usr/bin/time` và **không tạo CSV**. Cài lại nếu cần.
-> **Lưu ý peak RSS:** mọi thuật toán đều ra ~8.0–8.8 MB (chạy kiểm x86_64) vì RSS bị
-> baseline `libcrypto` (~6.5 MB) lấn át; chênh vài trăm KB giữa các dòng là **nhiễu**,
-> KHÔNG phải bộ nhớ riêng từng thuật toán. Tín hiệu bộ nhớ thật của PQC nằm ở **code
-> size + kích thước khoá/CT**.
+> **Lưu ý peak RSS:** cả 15 thuật toán đều ra **~8–9 MB** (chạy kiểm x86_64: rsa-3072
+> 8440 KB, rsa-7680 8500 KB…; con số tuyệt đối tuỳ máy/bản build) vì RSS bị baseline
+> `libcrypto` (~6.5 MB) lấn át; chênh vài trăm KB giữa các dòng là **nhiễu**, KHÔNG phải
+> bộ nhớ riêng từng thuật toán. Tín hiệu bộ nhớ thật của PQC nằm ở **code size + kích
+> thước khoá/CT**.
 **Nói trên video:** “Băng thông/khoá lớn của PQC lộ ra ở đây — phần code size.”
 
 ### 4.4 — WP3: liboqs ref/opt (thí nghiệm SIMD → RQ2)
@@ -514,20 +519,23 @@ diff data/summary_agg_$(uname -m).csv /tmp/agg_chk.csv && echo "AGG IDENTICAL vo
 diff data/summary_agg_$(uname -m)_spread.csv /tmp/spread_chk.csv && echo "SPREAD IDENTICAL voi analyze"
 ```
 
-**Analyze gom HẾT mọi cách đo (không sót CSV nào):** `make analyze` quét **cả**
-`data/*.csv` LẪN `data/raw/<arch>/*.csv` → 8 nhóm bảng: WP2 micro (median-of-medians),
-WP5 peak-RSS + code-size, WP3 liboqs ref/opt, và **WP4 cả 4 cách** — A `s_server`
-(`TLS 1.3 handshake (<arch>)`), B nginx (`... (nginx-<arch>)`), **C `tls_mini` + D track-D**
-(`Self-implemented TLS handshake - methods C/D` đọc từ `tlsmini_handshakes.csv` /
-`tlsmini_d_*` / `load_d_*`), cùng **D phân pha** (`Track D handshake phases`:
-keygen / ECDHE / key-sched / sig-verify từ `tlsmini_d_latency.csv`).
+**Analyze gom HẾT mọi cách đo:** `make analyze` quét **cả** `data/*.csv` LẪN
+`data/raw/<arch>/*.csv` (kể cả `pqclean_*_size.txt`) → **9 nhóm bảng**: WP2 micro
+(median-of-medians), WP5 peak-RSS + code-size lib trộn + **PQClean per-scheme code size**
+(`## PQClean per-scheme code size` đọc từ `pqclean_*_size.txt` — số code-size
+**per-algorithm** đáng tin, có cột `impl` clean/avx2/aarch64), WP3 liboqs ref/opt, và
+**WP4 cả 4 cách** — A `s_server` (`TLS 1.3 handshake (<arch>)`), B nginx (`...
+(nginx-<arch>)`), **C `tls_mini` + D track-D** (`Self-implemented TLS handshake -
+methods C/D` đọc từ `tlsmini_handshakes.csv` / `tlsmini_d_*` / `load_d_*`), cùng **D
+phân pha** (`Track D handshake phases` từ `tlsmini_d_latency.csv`).
 
 **Kiểm đúng:** mở `analysis_out/tables.md`; bảng “liboqs ref vs opt” có speedup >×1
 (chạy kiểm x86_64: ×3.2–×5.9) nghĩa là chuỗi WP3 thông suốt từ binary tới biểu đồ.
 Demo 2 batch → analyze in `median-of-medians over 2 batch(es)` và sinh
 `data/summary_agg_x86_64.csv` (+ `_spread.csv`); bản “lấy số thật” 5 batch in `over 5
-batch(es)`. Chạy kiểm: analyze sinh **8 nhóm bảng + 29 PNG** (cần `matplotlib`; thiếu
-thì chỉ có bảng — `pip install matplotlib` hoặc gói `python3-matplotlib`).
+batch(es)`. Chạy kiểm: analyze sinh **9 nhóm bảng + ~30 PNG** (gồm bảng PQClean
+per-scheme; cần `matplotlib`, thiếu thì chỉ có bảng — `pip install matplotlib` hoặc
+gói `python3-matplotlib`).
 **Nói trên video:** “Toàn bộ số gom thành bảng đối chiếu giả thuyết; 5 batch được gộp
 median-of-medians **ngay trong analyze** — không file thừa, không cp đè.”
 
@@ -711,7 +719,7 @@ RQ1/RQ2/RQ3 đọc từ `analysis_out/tables.md`.”
 | OpenSSL có PQC | `openssl list -kem-algorithms \| grep ML-KEM` | thấy ML-KEM-512/768/1024 |
 | WP2 micro | `openssl speed`, cycles ratio, KAT | cùng cỡ với speed; tỉ lệ thời gian ≈ tỉ lệ chu kỳ |
 | WP3 ref/opt | dòng `CPU exts compile-time:` của `speed_kem` | ref: `SSE SSE2`; opt: `… AVX AVX2 …`(x86)/`NEON`(ARM); speedup ref/opt phụ thuộc CPU (x86 chạy kiểm ×3.2–×5.9) |
-| WP5 | `size -t` (TOTALS), `readelf -S`, `/usr/bin/time -v` | per-scheme: `size -t … \| tail -1` = tổng (KHÔNG tin cột `libcrypto.a` trong CSV — bug NR==2); `libcrypto.so` khớp CSV; "Maximum resident set size" khớp `peak_rss_kb` (mọi algo ~8MB = baseline) |
+| WP5 | `size -t` (TOTALS), `readelf -S`, `/usr/bin/time -v` | per-scheme: `size -t … \| tail -1` = tổng; cột `libcrypto.a` trong CSV **đã đúng tổng** (sửa `size -t`, ~5.56 MB) — nhưng vẫn là lib trộn, per-algorithm chỉ tin PQClean; "Maximum resident set size" khớp `peak_rss_kb` (15 algo, mọi algo ~8–9 MB = baseline) |
 | WP4 A/B/C | `openssl s_client -CAfile` (cần server **đang chạy**, xem 4.5/4.6), `nginx -V` + `nginx -p RUN -c bench.conf -T/-t` (KHÔNG `-T` trần — nó đọc config mặc định `listen 80`), `curl http://…:8443`→400, `tshark -z conv,tcp` | `Verify return code: 0`; `nginx -c bench.conf -T` thấy `listen …:8443 ssl`+TLSv1.3; built with OpenSSL 3.6; group bịa → fail-loudly; bytes cert PQC lớn hơn (mldsa65 7517B ≫ rsa2048 1115B) |
 | group thật | cột `group` trong CSV (`SSL_get_negotiated_group`) | `X25519MLKEM768` |
 | **Track D** | `make repro`, `openssl s_client`, `openssl speed` | **ALL MATCH** (byte-exact); `Verify return code: 0` + “pong”; pha cùng cỡ speed |
@@ -772,13 +780,15 @@ chấp nhận handshake của ta), và với track D thêm `make repro` (đúng 
    `tls13-scratch/{server/server, client/client, common/repro_keylog}`, `server/server.crt`,
    và `handshake_bench.csv` (latency track-D khi quên `--csv`). Track-D latency **luôn**
    kèm `--csv ../../data/raw/<arch>/tlsmini_d_latency.csv` → số rơi vào `data/`, không vào source.
-10. **Hai điểm script đã biết (không phá demo, nhưng đừng tin nhầm số):** (a)
-    `measure_codesize.sh` đọc `awk 'NR==2'` → cột `libcrypto.a` trong CSV chỉ là object
-    ĐẦU của kho (chạy kiểm: **2653 B**, KHÔNG phải tổng); chỉ tin `libcrypto.so` (~6.5 MB)
-    + per-scheme `size -t` (§4.3). CSV còn có **2 dòng cùng tên `liboqs.so`** (ref ~5 MB vs
-    opt/neon ~11 MB) — phân biệt bằng kích thước. (b) `measure_memory.sh` chạy 12 algo (có
-    rsa-2048, thiếu rsa-7680/15360 + p521) — khác matrix 15 algo của WP2; nhưng peak RSS
-    không phân biệt được nên không ảnh hưởng kết luận.
+10. **Hai điểm script ĐÃ SỬA tận gốc (trước đây chỉ "đừng tin nhầm số"):** (a)
+    `measure_codesize.sh` từng đọc `awk 'NR==2'` → cột `libcrypto.a` chỉ là object ĐẦU
+    (2653 B). **Đã sửa** sang `size -t … | tail -1` (dòng `(TOTALS)`) → libcrypto.a +
+    per-scheme `.a` ra **đúng tổng** (chạy kiểm libcrypto.a = 5.56 MB). Vẫn lưu ý:
+    `libcrypto.a/.so` là lib trộn, per-algorithm chỉ tin PQClean; CSV có **2 dòng cùng tên
+    `liboqs.so`** (ref ~5 MB vs opt/neon ~11 MB) — phân biệt bằng kích thước. (b)
+    `measure_memory.sh` từng chạy 12 algo (có rsa-2048, thiếu rsa-7680/15360 + p521).
+    **Đã sửa** thành **15 algo y hệt `run_micro.sh`** (bảng RSS khớp 1:1 bảng WP2); keygen
+    iters hạ xuống 2 để RSA-15360 không kéo dài pass.
 
 > **11–13: ba lỗi đã PHÁT HIỆN & SỬA khi chạy thử toàn bản (đừng để tái phát):**
 
