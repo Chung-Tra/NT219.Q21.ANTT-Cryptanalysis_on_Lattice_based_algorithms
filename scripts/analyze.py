@@ -204,6 +204,42 @@ for p in sorted(DATA.glob("codesize_*.csv")):
               [(arch, [fnum(r["total_bytes"]) / 1024 for r in rows])],
               f"Code size ({arch})", "KiB", f"codesize_{arch}.png", log=True)
 
+# ---- 3b) PQClean per-scheme code size (WP5: the trustworthy PER-ALGORITHM number)
+# The codesize_*.csv above is the MIXED libcrypto/liboqs; the real per-scheme PQC
+# size comes from `size -t lib<scheme>_<impl>.a` saved to data/raw/<arch>/
+# pqclean_*_size.txt (each line: "<lib> text data bss dec hex (TOTALS)"; the §4.3/
+# §5.4 commands write basename on x86 and full path on ARM -> Path().name handles both).
+for d in sorted((DATA / "raw").glob("*")):
+    if not d.is_dir():
+        continue
+    arch = d.name
+    seen = {}  # (scheme, impl) -> (text, data, bss, total)  (dedup across files)
+    for f in sorted(d.glob("pqclean_*_size.txt")):
+        for line in f.read_text().splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            try:
+                text, data, bss, total = (int(parts[1]), int(parts[2]),
+                                          int(parts[3]), int(parts[4]))
+            except ValueError:
+                continue                       # header / malformed / non-TOTALS line
+            base = Path(parts[0]).name          # basename (x86) or from full path (ARM)
+            if base.startswith("lib"):
+                base = base[3:]
+            if base.endswith(".a"):
+                base = base[:-2]
+            scheme, _, impl = base.rpartition("_")   # ml-kem-768_clean -> ml-kem-768, clean
+            seen[(scheme or base, impl or "-")] = (text, data, bss, total)
+    if seen:
+        srows = [[s, i, t, da, b, tot] for (s, i), (t, da, b, tot) in sorted(seen.items())]
+        report.append(f"\n## PQClean per-scheme code size ({arch})\n")
+        report.append(md_table(["scheme", "impl", "text", "data", "bss", "total"], srows))
+        bar_chart([f"{r[0]}.{r[1]}" for r in srows],
+                  [("total bytes", [r[5] for r in srows])],
+                  f"PQClean per-scheme code size ({arch})", "bytes",
+                  f"pqclean_codesize_{arch}.png", log=True)
+
 # ---- 4) TLS handshake (WP4) -------------------------------------------------
 for p in sorted(DATA.glob("tls_handshake_*.csv")):
     arch = p.stem.removeprefix("tls_handshake_")
