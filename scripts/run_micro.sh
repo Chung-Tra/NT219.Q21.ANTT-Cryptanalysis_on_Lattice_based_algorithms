@@ -25,14 +25,22 @@ RAWDIR="$ROOT/data/raw/$ARCH"
 SUMMARY="$ROOT/data/summary_micro_${ARCH}.csv"
 mkdir -p "$RAWDIR"
 
-# Algorithm matrix: "family param". Edit freely.
-ALGOS=(
-  "rsa 3072" "rsa 7680" "rsa 15360"
-  "ecdsa p256" "ecdsa p384" "ecdsa p521"
-  "ecdh p256" "ecdh p384" "ecdh p521"
-  "mlkem 512" "mlkem 768" "mlkem 1024"
-  "mldsa 44" "mldsa 65" "mldsa 87"
-)
+# Algorithm matrix: "family param". This 15-algo set is the experiment design
+# (brief 7.1) and is the DEFAULT. For a quick screen-recording demo you may
+# shrink it WITHOUT editing this file via the MICRO_ALGOS env var (entries
+# separated by ';'), e.g.  MICRO_ALGOS="mlkem 768;mldsa 65;rsa 3072" make bench
+# (handy because ONE RSA-15360 keygen alone is ~30 s-several min).
+if [ -n "${MICRO_ALGOS:-}" ]; then
+  IFS=';' read -r -a ALGOS <<< "$MICRO_ALGOS"
+else
+  ALGOS=(
+    "rsa 3072" "rsa 7680" "rsa 15360"
+    "ecdsa p256" "ecdsa p384" "ecdsa p521"
+    "ecdh p256" "ecdh p384" "ecdh p521"
+    "mlkem 512" "mlkem 768" "mlkem 1024"
+    "mldsa 44" "mldsa 65" "mldsa 87"
+  )
+fi
 
 [ -x "$BENCH" ] || { echo "Not found: $BENCH (run 'make' first)"; exit 1; }
 echo "algo,metric,value" > "$SUMMARY"
