@@ -33,6 +33,7 @@ CONC="${TLS_CONC:-4}"; DUR="${TLS_DUR:-10}"
 CERTS="${CERTS:-rsa2048 ecp256 mldsa65}"
 GROUP_LIST="${GROUP_LIST:-X25519 X25519MLKEM768 MLKEM768}"
 WORKERS_LIST="${WORKERS_LIST:-1 auto}"
+LISTEN="${LISTEN:-127.0.0.1}"           # bind address; set LISTEN=0.0.0.0 for LAN (see KICH_BAN §5.9)
 SERVER_GROUPS="X25519:X25519MLKEM768:MLKEM768"
 ARCH="$(uname -m)"
 OUTCSV="$ROOT/data/tls_handshake_nginx-${ARCH}.csv"
@@ -54,6 +55,7 @@ for workers in $WORKERS_LIST; do
     CRT="$TLSDIR/$cert.cert.pem"; KEY="$TLSDIR/$cert.key.pem"
     [ -f "$CRT" ] || { echo "skip cert $cert (missing)"; continue; }
     sed -e "s|__WORKERS__|$workers|" -e "s|__PORT__|$PORT|" \
+        -e "s|__LISTEN__|$LISTEN|" \
         -e "s|__CRT__|$CRT|" -e "s|__KEY__|$KEY|" \
         -e "s|__GROUPS__|$SERVER_GROUPS|" \
         "$HERE/nginx_bench.conf" > "$RUN/bench.conf"
@@ -79,13 +81,14 @@ for workers in $WORKERS_LIST; do
               p=a[int(0.95*NR)>0?int(0.95*NR):1];
               printf "%.3f %.3f %.3f", m/1000, s/NR/1000, p/1000 }')"
       rm -f "$TMP"
-      CNTDIR="$(mktemp -d)"
+      CNTDIR="$(mktemp -d)"; WPIDS=""
       for w in $(seq 1 "$CONC"); do
         ( n=0; end=$(( $(date +%s) + DUR ))
           while [ "$(date +%s)" -lt "$end" ]; do one_handshake "$grp" "$CRT" && n=$((n+1)); done
           echo "$n" > "$CNTDIR/$w" ) &
+        WPIDS="$WPIDS $!"
       done
-      wait
+      wait $WPIDS          # wait ONLY for the workers, not the background nginx (bare 'wait' would hang on it)
       TOTAL=$(cat "$CNTDIR"/* | awk '{s+=$1} END{print s}')
       rm -rf "$CNTDIR"
       TPS=$(awk -v t="$TOTAL" -v d="$DUR" 'BEGIN{printf "%.1f", t/d}')
