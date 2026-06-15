@@ -156,18 +156,29 @@ cat docs/env_report_x86_64.txt               # bien ban: compiler, co, CPU, gove
 **Nói trên video:** “verify_env PASS nghĩa là OpenSSL đang dùng thật sự có ML-KEM.”
 
 ### 4.2 — WP2: microbenchmark K-batch (số liệu xương sống → RQ1)
-**Đo gì:** latency từng phép (keygen/encaps/decaps/sign/verify) cho 12 thuật toán,
+**Đo gì:** latency từng phép (keygen/encaps/decaps/sign/verify) cho 15 thuật toán,
 qua **EVP API** chung, đồng hồ **CLOCK_MONOTONIC_RAW**.
 **Tại sao:** đo qua cùng một “mặt tiền” EVP → chênh lệch là **của thuật toán**,
 không phải của cách gọi. RAW = không bị NTP/kernel nắn giờ. Ghim xung CPU vì
 governor tiết kiệm điện làm hai lần đo ra hai số khác nhau.
 **Lệnh quay:**
 ```sh
-sudo cpupower frequency-set -g performance
+sudo cpupower frequency-set -g performance   # VM/container khong co cpufreq -> bo qua (env_report ghi 'unavailable')
 for i in 1 2 3 4 5; do
   BENCH_WARMUP=50 BENCH_ITERS=5000 make bench
   cp data/summary_micro_x86_64.csv data/raw/x86_64/summary_batch$i.csv
+  # GIU raw+kv tung thuat toan THEO batch (neu khong, batch sau GHI DE batch truoc):
+  for f in data/raw/x86_64/*.raw.csv; do
+    [ -e "$f" ] || continue
+    a=$(basename "$f" .raw.csv); mkdir -p "data/raw/x86_64/$a"
+    mv "$f" "data/raw/x86_64/$a/batch$i.raw.csv"
+    [ -e "data/raw/x86_64/$a.kv.txt" ] && mv "data/raw/x86_64/$a.kv.txt" "data/raw/x86_64/$a/batch$i.kv.txt"
+  done
 done
+# CANH BAO RSA-15360 (muc 5, baseline) RAT cham: keygen ~28s/lan, sign+decrypt ~0.24s/op
+# -> rieng no ton ~40-60 phut/batch o BENCH_ITERS=5000. Khuyen nghi: de BENCH_KEYGEN_ITERS
+# thap (vd 5) va/hoac ha BENCH_ITERS cho hop ly; hoac do RSA-15360 thanh 1 batch rieng.
+# (Quay demo nhanh thi dat ITERS=1 cho ca matrix nhu may chay thu.)
 ```
 **Kiểm đúng (tool có sẵn):**
 ```sh
@@ -262,21 +273,21 @@ multi‑threaded server” §7.4 đòi. nginx “thuê” đúng OpenSSL ta buil
 **Lệnh quay:**
 ```sh
 bash scripts/build_nginx.sh
-nginx -V                              # phai in: built with OpenSSL 3.6.2
+~/pqc/nginx/sbin/nginx -V             # phai in: built with OpenSSL 3.6.2 (nginx KHONG trong PATH)
 bash scripts/bench_tls_nginx.sh       # -> data/tls_handshake_nginx-x86_64.csv (do TLS tren 8443)
 ```
 **Kiểm đúng (tool có sẵn) — gồm xác nhận ĐÚNG LÀ HTTPS, không phải HTTP:**
 ```sh
-nginx -V 2>&1 | grep -i "built with OpenSSL"   # OpenSSL 3.6.x  <- thue dung nha
-nginx -T 2>&1 | grep -E "listen|ssl_protocols|ssl_certificate"   # phai thay 'listen 8443 ssl' + TLSv1.3
-nginx -t                                       # config OK; group bia -> SSL_CTX_set1_curves_list failed
+~/pqc/nginx/sbin/nginx -V 2>&1 | grep -i "built with OpenSSL"   # OpenSSL 3.6.x  <- thue dung nha
+~/pqc/nginx/sbin/nginx -T 2>&1 | grep -E "listen|ssl_protocols|ssl_certificate"   # phai thay 'listen 127.0.0.1:8443 ssl' + TLSv1.3
+~/pqc/nginx/sbin/nginx -t                                       # config OK; group bia -> SSL_CTX_set1_curves_list failed
 # bat tay TLS that voi nginx (chung minh HTTPS):
 echo | ~/pqc/openssl/bin/openssl s_client -connect 127.0.0.1:8443 -tls1_3 \
   -groups X25519MLKEM768 -CAfile ~/pqc/tls/mldsa65.cert.pem 2>&1 \
   | grep -E "Protocol|Cipher|group|Verify"     # TLSv1.3 + Verify return code: 0
 # bang chung cong la TLS-only (HTTPS), khong phai HTTP tran:
 curl -k https://127.0.0.1:8443/ -o /dev/null -s -w "https OK: %{http_code}\n"
-curl     http://127.0.0.1:8443/ -o /dev/null -s -w "http: %{http_code}\n" || echo "http: bi tu choi (dung - cong nay chi TLS)"
+curl     http://127.0.0.1:8443/ -o /dev/null -s -w "http: %{http_code}  (400 = nginx tu choi HTTP tran tren cong TLS)\n"
 ldd "$(command -v nginx || echo ~/pqc/nginx/sbin/nginx)" | grep -i ssl   # phai tro ~/pqc/openssl
 ```
 → `s_client` ra `TLSv1.3` + `Verify return code: 0` = nginx phục vụ **HTTPS**; `curl
@@ -301,6 +312,10 @@ make tlsmini tlsclient
 # cua so 2 (client):
 ./build/tls_timer_client 127.0.0.1 9443 X25519MLKEM768 50 ~/pqc/tls/mldsa65.cert.pem
 ```
+> **Dừng server:** cửa sổ khác chạy `pkill -f tls_mini_server`. **Ctrl-C KHÔNG dừng được**
+> (handler `signal()` + glibc SA_RESTART làm `accept()` khởi động lại). 50 dòng CSV đã được
+> `tee` ghi (flush từng dòng) nên dừng kiểu nào cũng không mất số.
+
 **Kiểm đúng (tool có sẵn):** cột `group` trong CSV = `X25519MLKEM768` (qua
 `SSL_get_negotiated_group`) → **bằng chứng cứng** phiên đo thật sự chạy PQC; ép TLS
 1.2 phải bị từ chối bằng alert.
@@ -329,7 +344,8 @@ make cert                                    # cert trong server/ (lan dau)
 mkdir -p ../data/raw/x86_64                   # de redirect CSV khong loi (neu chua co)
 # latency (client): server o server/, client o client/
 ( cd server && ./server 8400 1100 ) &
-cd client && BENCH_ITERS=1000 ./client 127.0.0.1 8400 --bench --warmup 100; cd ..
+cd client && BENCH_ITERS=1000 ./client 127.0.0.1 8400 --bench --warmup 100 \
+  --csv ../../data/raw/x86_64/tlsmini_d_latency.csv; cd ..   # --csv -> so vao data/, KHONG tao handshake_bench.csv trong source
 # throughput + server-side CSV, don luong (tu server//client/ la ../../data):
 ( cd server && ./server 8400 20000 --threads 1 > ../../data/raw/x86_64/tlsmini_d_st.csv 2> run.log ) &
 ( cd client && ./client 127.0.0.1 8400 --load --threads 16 --total 20000 --csv ../../data/raw/x86_64/load_d_st.csv )
@@ -356,11 +372,53 @@ thô) — chênh do tạo/huỷ object EVP mỗi handshake (chi phí thực per-
 **Nói trên video:** “Track D tự viết protocol; `make repro` chứng minh đúng từng
 byte so RFC, rồi đo handshake cùng cách A/B/C.”
 
-### 4.9 — analyze: từ CSV ra bảng + biểu đồ
+### 4.9 — analyze: từ CSV ra bảng + biểu đồ (gộp 5 batch NGAY trong analyze)
 **Lệnh quay:** `make analyze`  → `analysis_out/tables.md` + `*.png`.
+
+**Gộp K-batch (median-of-medians) — KHÔNG script riêng, KHÔNG `cp` đè file canonical:**
+`scripts/analyze.py` tự dò `data/raw/<arch>/summary_batch*.csv`. Có ≥1 batch → nó
+**tự gộp**: lấy *median qua các batch* cho từng `(algo, metric)`, ghi ra rồi VẼ luôn từ bản gộp:
+- `data/summary_agg_<arch>.csv` — `algo,metric,value` (value = median-of-medians = **số chính thức**)
+- `data/summary_agg_<arch>_spread.csv` — `n,median,mean,min,max,`**`cv_pct`** (cv cao = nhiễu, vd RSA keygen)
+
+Không có batch nào → tự fallback `summary_micro_<arch>.csv` (1 lần đo). Vì gộp nằm
+**trong** analyze nên **mỗi file một vai trò**, **bỏ hẳn** bước cũ `cp summary_agg →
+summary_micro` (đè file canonical). `summary_micro` vẫn là "batch mới nhất", `summary_agg` là "bản gộp".
+
+**Gộp tay trên terminal (đối chứng — ra đúng `summary_agg_<arch>.csv` như analyze):**
+```sh
+python3 - "$(uname -m)" <<'PY'
+import csv, statistics, glob, sys
+from collections import defaultdict
+arch = sys.argv[1]; s = defaultdict(list)
+for f in sorted(glob.glob(f"data/raw/{arch}/summary_batch*.csv")):
+    for r in csv.DictReader(open(f)):
+        try: s[(r["algo"], r["metric"])].append(float(r["value"]))
+        except ValueError: pass
+agg = open(f"data/summary_agg_{arch}.csv", "w"); agg.write("algo,metric,value\n")
+spr = open(f"data/summary_agg_{arch}_spread.csv", "w"); spr.write("algo,metric,n,median,mean,min,max,cv_pct\n")
+for (a, m), v in sorted(s.items()):
+    md = statistics.median(v); mn = statistics.fmean(v)
+    sd = statistics.stdev(v) if len(v) > 1 else 0.0
+    agg.write(f"{a},{m},{md:.6g}\n")
+    spr.write(f"{a},{m},{len(v)},{md:.6g},{mn:.6g},{min(v):.6g},{max(v):.6g},{100*sd/mn if mn else 0:.2f}\n")
+print(f"wrote data/summary_agg_{arch}.csv (+ _spread.csv) tu {len(glob.glob(f'data/raw/{arch}/summary_batch*.csv'))} batch")
+PY
+```
+
+**Analyze gom HẾT mọi cách đo (không sót CSV nào):** `make analyze` quét **cả**
+`data/*.csv` LẪN `data/raw/<arch>/*.csv` → 8 nhóm bảng: WP2 micro (median-of-medians),
+WP5 peak-RSS + code-size, WP3 liboqs ref/opt, và **WP4 cả 4 cách** — A `s_server`
+(`TLS 1.3 handshake (<arch>)`), B nginx (`... (nginx-<arch>)`), **C `tls_mini` + D track-D**
+(`Self-implemented TLS handshake - methods C/D` đọc từ `tlsmini_handshakes.csv` /
+`tlsmini_d_*` / `load_d_*`), cùng **D phân pha** (`Track D handshake phases`:
+keygen / ECDHE / key-sched / sig-verify từ `tlsmini_d_latency.csv`).
+
 **Kiểm đúng:** mở `analysis_out/tables.md`; bảng “liboqs ref vs opt” có speedup
-×2.6–2.9 nghĩa là chuỗi WP3 thông suốt từ binary tới biểu đồ.
-**Nói trên video:** “Toàn bộ số ở trên gom thành bảng đối chiếu với giả thuyết.”
+×2.6–2.9 nghĩa là chuỗi WP3 thông suốt từ binary tới biểu đồ. Có 5 batch thì analyze
+in dòng `median-of-medians over 5 batch(es)` và sinh `data/summary_agg_x86_64.csv`.
+**Nói trên video:** “Toàn bộ số gom thành bảng đối chiếu giả thuyết; 5 batch được gộp
+median-of-medians **ngay trong analyze** — không file thừa, không cp đè.”
 
 ### 4.10 — (Tùy chọn) đo mở rộng + Docker tái lập + nghiệm thu x86
 ```sh
@@ -413,12 +471,21 @@ sudo cpupower frequency-set -g performance        # (1) ghim xung
 for i in 1 2 3 4 5; do                            # (2) K=5 batch
   BENCH_ITERS=1500 make bench                      # (3) vong THAP hon x86 (1500 vs 5000): nhiet leo it
   cp data/summary_micro_aarch64.csv data/raw/aarch64/summary_batch$i.csv   # (4)
+  # (4b) GIU raw+kv tung thuat toan THEO batch (NHU x86 §4.2; thieu thi batch sau GHI DE batch truoc):
+  for f in data/raw/aarch64/*.raw.csv; do
+    [ -e "$f" ] || continue
+    a=$(basename "$f" .raw.csv); mkdir -p "data/raw/aarch64/$a"
+    mv "$f" "data/raw/aarch64/$a/batch$i.raw.csv"
+    [ -e "data/raw/aarch64/$a.kv.txt" ] && mv "data/raw/aarch64/$a.kv.txt" "data/raw/aarch64/$a/batch$i.kv.txt"
+  done
   cat /sys/class/thermal/thermal_zone0/temp        # (5) doc nhiet (70000 = 70.0C)
   sleep 120                                         # (6) nghi 2 phut cho ha nhiet
 done
 ```
 **Tại sao:** vòng thấp + nghỉ nguội giữ Pi **dưới ngưỡng throttle** để batch sau
-không chậm hơn batch trước **vì nhiệt** (chứ không phải vì thuật toán).
+không chậm hơn batch trước **vì nhiệt** (chứ không phải vì thuật toán). Vòng `(4b)`
+**y hệt §4.2 (x86)**: gom raw+kv từng thuật toán theo batch vào `data/raw/aarch64/<algo>/`
+— thiếu nó thì batch sau ghi đè raw batch trước (chỉ còn batch 5).
 **Kiểm đúng:** bench_evp tự nhận ARM lúc compile — bộ đếm chu kỳ chuyển từ `rdtsc`
 (x86) sang `cntvct` (ARM); cùng một mã nguồn, hai kiến trúc.
 
@@ -456,7 +523,8 @@ make && make repro                      # repro byte-exact tren ARM
 make cert
 mkdir -p ../data/raw/aarch64
 ( cd server && ./server 8400 1100 ) &
-( cd client && BENCH_ITERS=1000 ./client 127.0.0.1 8400 --bench --warmup 100 )
+( cd client && BENCH_ITERS=1000 ./client 127.0.0.1 8400 --bench --warmup 100 \
+    --csv ../../data/raw/aarch64/tlsmini_d_latency.csv )   # --csv -> data/, tranh handshake_bench.csv rac
 ( cd server && ./server 8400 20000 --threads $(nproc) > ../../data/raw/aarch64/tlsmini_d_mt.csv 2> run.log ) &
 ( cd client && ./client 127.0.0.1 8400 --load --threads 16 --total 20000 --csv ../../data/raw/aarch64/load_d_mt.csv )
 ```
@@ -466,7 +534,7 @@ phụ thuộc kiến trúc); interop `openssl s_client` như §4.8.
 
 ### 5.7 — analyze + bảng cross-platform + push
 ```sh
-make analyze
+make analyze    # tu gop summary_batch* aarch64 -> summary_agg_aarch64 (median-of-medians, nhu §4.9)
 git add data analysis_out docs && git commit -m "aarch64 measurements" && git push
 ```
 **Kiểm đúng:** bảng **Cross-platform ratio** chỉ xuất hiện khi `data/` có CSV của
@@ -520,7 +588,7 @@ RQ1/RQ2/RQ3 đọc từ `analysis_out/tables.md`.”
 | WP2 micro | `openssl speed`, cycles ratio, KAT | cùng cỡ với speed; tỉ lệ thời gian ≈ tỉ lệ chu kỳ |
 | WP3 ref/opt | banner `speed_kem` | ref in `SSE/SSE2`; opt in `AVX2`(x86)/`NEON`(ARM) |
 | WP5 | `size`, `readelf -S`, `/usr/bin/time -v` | số `size` khớp cột code-size; "Maximum resident set size" khớp `peak_rss_kb` |
-| WP4 A/B/C | `openssl s_client -CAfile` (cần s_server đang chạy, xem 4.5), `nginx -V`, `nginx -T` (xem `listen 8443 ssl` + TLSv1.3), `nginx -t`, `curl http://…:8443` (phải bị từ chối), `tshark -z conv,tcp` | `Verify return code: 0`; nginx là **HTTPS** không phải HTTP; built with OpenSSL 3.6; group bịa → fail-loudly; bytes cert PQC lớn hơn |
+| WP4 A/B/C | `openssl s_client -CAfile` (cần s_server đang chạy, xem 4.5), `~/pqc/nginx/sbin/nginx -V/-T/-t` (xem `listen 127.0.0.1:8443 ssl` + TLSv1.3), `curl http://…:8443` → 400, `tshark -z conv,tcp` | `Verify return code: 0`; nginx là **HTTPS** không phải HTTP; built with OpenSSL 3.6; group bịa → fail-loudly; bytes cert PQC lớn hơn |
 | group thật | cột `group` trong CSV (`SSL_get_negotiated_group`) | `X25519MLKEM768` |
 | **Track D** | `make repro`, `openssl s_client`, `openssl speed` | **ALL MATCH** (byte-exact); `Verify return code: 0` + “pong”; pha cùng cỡ speed |
 | Cross-compile | `file <lib>` | `ARM aarch64` |
@@ -538,7 +606,7 @@ chấp nhận handshake của ta), và với track D thêm `make repro` (đúng 
 - [ ] `verify_env` PASS + `openssl version` = 3.6.2
 - [ ] 5 file batch trong `data/raw/x86_64/`
 - [ ] `memory` / `codesize` / `liboqs_speed` / `tls_handshake*` CSV có số
-- [ ] WP4: `s_client` báo Verify=0 trên cả 3 cert; `nginx -V` OpenSSL 3.6
+- [ ] WP4: `s_client` báo Verify=0 trên cả 3 cert; `~/pqc/nginx/sbin/nginx -V` OpenSSL 3.6
 - [ ] **Track D**: `make repro` ALL MATCH; latency + throughput (đơn & đa luồng)
 - [ ] `analysis_out/tables.md` + PNG
 - [ ] đã `git push`
@@ -566,6 +634,20 @@ chấp nhận handshake của ta), và với track D thêm `make repro` (đúng 
 5. **Group bịa** (gõ sai tên nhóm) → fail-loudly với `SSL_CTX_set1_curves_list
    failed`; đây là **tính năng** (chống “thuê nhầm nhà”), không phải lỗi của bạn.
 6. **Đo trong QEMU/Docker** → cấm; chỉ dùng làm bằng chứng đóng gói.
+7. **File nào bị đè, file nào giữ:** chạy lại **cùng một lệnh** đè file *canonical* của
+   chính nó (`summary_micro_<arch>.csv`, `tls_handshake_<arch>.csv`,
+   `tls_handshake_nginx-<arch>.csv`, `tlsmini_handshakes.csv`, `tlsmini_d_*.csv`, raw
+   `<algo>.raw.csv`) — **cố ý** (analyze đọc bản mới nhất). **A/B/C/D KHÔNG đè nhau**
+   (tên khác + tách `<arch>`). Chỉ lịch sử K-batch cần giữ tay: `summary_batch$i.csv`
+   (cp) + `<algo>/batch$i.*` (archive loop §4.2 cho x86 **và** §5.2 cho ARM).
+8. **Gộp 5 batch: KHÔNG script riêng, KHÔNG `cp` đè.** `make analyze` **tự** dò
+   `data/raw/<arch>/summary_batch*.csv` → median-of-medians → `summary_agg_<arch>.csv`
+   (+ `_spread.csv`; `cv_pct` cao = nhiễu, vd RSA keygen) → vẽ luôn từ bản gộp. Không
+   có batch → fallback `summary_micro`. (Bản gộp tay trên terminal: xem §4.9.)
+9. **File rác đừng commit** (đã chặn trong `.gitignore`): binary track-D
+   `tls13-scratch/{server/server, client/client, common/repro_keylog}`, `server/server.crt`,
+   và `handshake_bench.csv` (latency track-D khi quên `--csv`). Track-D latency **luôn**
+   kèm `--csv ../../data/raw/<arch>/tlsmini_d_latency.csv` → số rơi vào `data/`, không vào source.
 
 ---
 
