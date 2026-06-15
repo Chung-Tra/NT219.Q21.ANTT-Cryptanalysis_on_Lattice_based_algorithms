@@ -116,6 +116,36 @@ Thời lượng gợi ý: 8–12 phút. Không cần quay phần build OpenSSL ~
 > này là bản **đầy đủ/giải thích** để quay kỹ hơn; bạn có thể chiếu `demo.sh` cho
 > bản ngắn rồi dùng các §dưới để nói sâu từng phần.
 
+### 3.1 — Bộ tham số DEMO-FAST (đã chạy thật, ráp lại để quay nhanh)
+
+Toàn bộ kịch bản dưới có giá trị mặc định “lấy số thật” (chậm). Để **quay demo**,
+ghi đè bằng các biến môi trường sau — tất cả đã được chạy kiểm trên x86_64, thời
+gian thực đo kèm theo:
+
+| Phần | Lệnh DEMO-FAST | ~Thời gian |
+|------|----------------|-----------|
+| WP2 micro (K-batch) | `for i in 1 2; do MICRO_ALGOS="mlkem 768;mldsa 65;rsa 3072" BENCH_WARMUP=0 BENCH_ITERS=1 BENCH_KEYGEN_ITERS=1 make bench; cp data/summary_micro_$(uname -m).csv data/raw/$(uname -m)/summary_batch$i.csv; done` | **~2 s** |
+| WP5 memory/codesize | `make memory && make codesize` | ~15 s |
+| WP3 liboqs | `bash scripts/run_liboqs_speed.sh` (sau khi đã build ref+opt) | ~40 s |
+| WP4-A s_server | `TLS_ITERS=3 TLS_WARMUP=1 TLS_CONC=2 TLS_DUR=1 make tls` | **~9 s** |
+| WP4-B nginx | `WORKERS_LIST=1 TLS_ITERS=3 TLS_WARMUP=1 TLS_CONC=2 TLS_DUR=1 bash scripts/bench_tls_nginx.sh` | **~9 s** |
+| WP4-C tls_mini | client `... 9443 X25519MLKEM768 5 ...` (5 handshake) | ~1 s |
+| Track D latency | server `count=25`, client `BENCH_ITERS=20 ... --warmup 5` | ~1 s |
+| Track D throughput | server `count=200`, client `--total 200 --threads 8` | ~3 s |
+
+> **Vì sao WP2 mặc-định-nhanh vẫn lâu nếu không dùng `MICRO_ALGOS`:** ma trận 15
+> thuật toán gồm **RSA-15360**, mà **một** lần keygen RSA-15360 đã ngốn ~30 s–vài
+> phút (chạy kiểm: 2 batch × 15 algo, warmup=0/iter=keygen=1 = **7 phút 38 giây**,
+> gần như toàn bộ là RSA-15360/7680 keygen). `MICRO_ALGOS` (mới thêm, mặc định =
+> đủ 15) cho phép quay nhanh **không sửa file** — vẫn giữ ma trận đầy đủ cho số thật.
+
+> **Đã kiểm chứng & sửa (lần chạy thử toàn bản này):** §4.5 `make tls` và §4.6
+> `bench_tls_nginx.sh` trước đây **treo vô hạn** do `wait` chờ luôn cả tiến trình
+> server nền — **đã sửa** thành `wait` đúng các worker; §4.6 `nginx_bench.conf`
+> thiếu thay `__LISTEN__` khiến nginx **không khởi động** — **đã sửa** trong
+> `bench_tls_nginx.sh`. Lệnh kiểm `nginx -T` ở §4.6 và đoạn gộp tay ở §4.9 cũng đã
+> chỉnh cho khớp thực tế (xem từng mục).
+
 ---
 
 ## §4. KỊCH BẢN MÁY x86_64 (Ubuntu)
@@ -161,25 +191,37 @@ qua **EVP API** chung, đồng hồ **CLOCK_MONOTONIC_RAW**.
 **Tại sao:** đo qua cùng một “mặt tiền” EVP → chênh lệch là **của thuật toán**,
 không phải của cách gọi. RAW = không bị NTP/kernel nắn giờ. Ghim xung CPU vì
 governor tiết kiệm điện làm hai lần đo ra hai số khác nhau.
-**Lệnh quay:**
+**Lệnh quay (DEMO-FAST — 2 batch, warmup=0, iter=keygen=1, ~2 giây):**
 ```sh
 sudo cpupower frequency-set -g performance   # VM/container khong co cpufreq -> bo qua (env_report ghi 'unavailable')
-for i in 1 2 3 4 5; do
-  BENCH_WARMUP=50 BENCH_ITERS=5000 BENCH_KEYGEN_ITERS=50 make bench
-  cp data/summary_micro_x86_64.csv data/raw/x86_64/summary_batch$i.csv
+ARCH=$(uname -m)
+for i in 1 2; do                                                 # demo: K=2 batch
+  MICRO_ALGOS="mlkem 768;mldsa 65;rsa 3072" \
+    BENCH_WARMUP=0 BENCH_ITERS=1 BENCH_KEYGEN_ITERS=1 make bench  # subset 3 algo -> nhanh
+  cp data/summary_micro_${ARCH}.csv data/raw/${ARCH}/summary_batch$i.csv
   # GIU raw+kv tung thuat toan THEO batch (neu khong, batch sau GHI DE batch truoc):
-  for f in data/raw/x86_64/*.raw.csv; do
+  for f in data/raw/${ARCH}/*.raw.csv; do
     [ -e "$f" ] || continue
-    a=$(basename "$f" .raw.csv); mkdir -p "data/raw/x86_64/$a"
-    mv "$f" "data/raw/x86_64/$a/batch$i.raw.csv"
-    [ -e "data/raw/x86_64/$a.kv.txt" ] && mv "data/raw/x86_64/$a.kv.txt" "data/raw/x86_64/$a/batch$i.kv.txt"
+    a=$(basename "$f" .raw.csv); mkdir -p "data/raw/${ARCH}/$a"
+    mv "$f" "data/raw/${ARCH}/$a/batch$i.raw.csv"
+    [ -e "data/raw/${ARCH}/$a.kv.txt" ] && mv "data/raw/${ARCH}/$a.kv.txt" "data/raw/${ARCH}/$a/batch$i.kv.txt"
   done
 done
-# CANH BAO RSA-15360 (muc 5, baseline) RAT cham: keygen ~28s/lan, sign+decrypt ~0.24s/op
-# -> rieng no ton ~40-60 phut/batch o BENCH_ITERS=5000. Khuyen nghi: de BENCH_KEYGEN_ITERS
-# thap (vd 5) va/hoac ha BENCH_ITERS cho hop ly; hoac do RSA-15360 thanh 1 batch rieng.
-# (Quay demo nhanh thi dat ITERS=1 cho ca matrix nhu may chay thu.)
 ```
+**Lệnh “lấy số thật” (báo cáo — K=5 batch, đủ 15 thuật toán, BỎ `MICRO_ALGOS`):**
+```sh
+for i in 1 2 3 4 5; do
+  BENCH_WARMUP=50 BENCH_ITERS=5000 BENCH_KEYGEN_ITERS=50 make bench
+  cp data/summary_micro_$(uname -m).csv data/raw/$(uname -m)/summary_batch$i.csv
+  # ... (vong archive raw+kv y het tren) ...
+done
+```
+> **CẢNH BÁO RSA-15360 (mức 5, baseline) RẤT chậm:** **một** lần keygen ~30 s–vài
+> phút (chạy kiểm: 2 batch × đủ 15 algo ở iter=keygen=1 = **7 phút 38 giây**, gần
+> như toàn bộ là RSA-15360/7680 keygen). Vì vậy demo **nên** dùng `MICRO_ALGOS`
+> (bỏ RSA-15360) như trên; muốn số thật cho mức 5 thì để keygen iters thấp (vd 5)
+> hoặc đo RSA-15360 thành 1 batch riêng. `MICRO_ALGOS` mặc định = đủ 15 (không đặt
+> = chạy ma trận đầy đủ, không đổi thiết kế thí nghiệm).
 **Kiểm đúng (tool có sẵn):**
 ```sh
 ./build/bench_evp mlkem 768                   # chay thu 1 thuat toan
@@ -219,9 +261,13 @@ done | tee data/raw/x86_64/pqclean_clean_size.txt
   /usr/bin/time -v ./build/bench_evp mldsa 65 2>&1 | grep "Maximum resident set size"
   ```
   (`time` builtin của shell **không** in dòng này — phải đúng `/usr/bin/time`.)
-> **Lưu ý peak RSS:** mọi thuật toán đều ra ~7.8–8.1 MB vì RSS bị baseline `libcrypto`
-> (~6.5 MB) lấn át; chênh ~300 KB giữa các dòng là **nhiễu**, KHÔNG phải bộ nhớ riêng
-> từng thuật toán. Tín hiệu bộ nhớ thật của PQC nằm ở **code size + kích thước khoá/CT**.
+  ⚠ `/usr/bin/time` đến từ gói `time` (Ubuntu: `sudo apt install time`). Gói này nằm
+  ở **đợt cài “không bắt buộc”** của `install_prereqs.sh` nên có thể vắng — thiếu nó
+  `make memory` báo `Need GNU time at /usr/bin/time` và **không tạo CSV**. Cài lại nếu cần.
+> **Lưu ý peak RSS:** mọi thuật toán đều ra ~8.0–8.8 MB (chạy kiểm x86_64) vì RSS bị
+> baseline `libcrypto` (~6.5 MB) lấn át; chênh vài trăm KB giữa các dòng là **nhiễu**,
+> KHÔNG phải bộ nhớ riêng từng thuật toán. Tín hiệu bộ nhớ thật của PQC nằm ở **code
+> size + kích thước khoá/CT**.
 **Nói trên video:** “Băng thông/khoá lớn của PQC lộ ra ở đây — phần code size.”
 
 ### 4.4 — WP3: liboqs ref/opt (thí nghiệm SIMD → RQ2)
@@ -237,12 +283,15 @@ bash scripts/run_liboqs_speed.sh      # -> data/liboqs_speed_x86_64.csv
 ```
 **Kiểm đúng (tool có sẵn):**
 ```sh
-~/pqc/src/liboqs/build-ref/tests/speed_kem ML-KEM-768   # banner in: SSE SSE2
-~/pqc/src/liboqs/build-opt/tests/speed_kem ML-KEM-768   # banner phai in: AVX2 ...
+# Dong "CPU exts compile-time:" la bang chung SIMD (chay kiem ra dung):
+~/pqc/src/liboqs/build-ref/tests/speed_kem ML-KEM-768 | grep "CPU exts"   # -> SSE SSE2
+~/pqc/src/liboqs/build-opt/tests/speed_kem ML-KEM-768 | grep "CPU exts"   # -> ... AVX AVX2 AVX512 ...
 #   ^ hai banner khac nhau = bang chung hai cay khac dung cho (neu ten thu muc khac, thu: ls ~/pqc/src/liboqs/build-*)
 head -5 data/liboqs_speed_x86_64.csv
 ```
 **Nói trên video:** “Cùng máy, chỉ khác AVX2 — chênh lệch chính là giá trị của tối ưu.”
+> Speedup ref→opt **phụ thuộc CPU**; chạy kiểm trên x86_64 ra **×3.2–×5.9** (KEM/keygen
+> ~×3.2–3.7, sign ML-DSA tới ~×5.9). Đừng kỳ vọng đúng một con số cố định.
 
 ### 4.5 — WP4-A: TLS handshake, server = `s_server` (cô lập mật mã → RQ3)
 **Đo gì:** latency (lặp handshake tuần tự) + throughput (thả nhiều client song song),
@@ -254,8 +303,12 @@ PQC khác biệt nhất).
 **Lệnh quay:**
 ```sh
 bash scripts/gen_tls_certs.sh         # 3 cert: rsa2048, ecp256, mldsa65
-make tls                              # -> data/tls_handshake_x86_64.csv
+TLS_ITERS=3 TLS_WARMUP=1 TLS_CONC=2 TLS_DUR=1 make tls   # DEMO-FAST ~9s -> data/tls_handshake_x86_64.csv
+# (lay so that: 'make tls' tran -> TLS_ITERS=50 TLS_CONC=4 TLS_DUR=10)
 ```
+> **Đã sửa (lần chạy thử này):** trước đây `make tls` **treo vô hạn** ở pha throughput
+> vì lệnh `wait` (không tham số) chờ luôn cả `s_server` chạy nền. Đã sửa thành chờ
+> đúng các worker (`wait $WPIDS`) — giờ chạy xong ~9 s, in đủ 9 dòng (3 cert × 3 group).
 **Kiểm đúng (tool có sẵn):** `make tls` đã dùng `-verify_return_error` nên mọi
 handshake **đếm được** đều verify thành công. Muốn kiểm **độc lập** (không phụ thuộc
 script), tự dựng s_server rồi nối bằng s_client — vì `make tls` *không* để server
@@ -269,9 +322,11 @@ echo Q | ~/pqc/openssl/bin/openssl s_client -connect 127.0.0.1:4433 -tls1_3 \
   | grep -E "Cipher|group|Temp Key|signature|Verify"
 kill %1                                          # tat s_server
 ```
-→ thấy `Cipher is TLS_AES_256_GCM_SHA384`, nhóm `X25519MLKEM768` (dòng *Negotiated
-group* / *Server Temp Key*), `Peer signature type: ML-DSA-65`, `Verify return code:
-0 (ok)`.
+→ thấy (chạy kiểm, OpenSSL 3.6.2): `New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384`,
+`Negotiated TLS1.3 group: X25519MLKEM768`, `Peer signature type: mldsa65` (OpenSSL in
+**chữ thường**, không phải `ML-DSA-65`), `Verify return code: 0 (ok)`. (Grep ở trên có
+`Temp Key` chỉ để phòng hờ — bản 3.6.2 in `Negotiated TLS1.3 group` nên dòng đó có thể
+trống, không sao.)
 **Nói trên video:** “Đây là handshake PQC thật — nhóm hybrid + cert ML-DSA.”
 
 ### 4.6 — WP4-B: TLS handshake, `nginx` **HTTPS** (server sản xuất + trục đơn/đa luồng → RQ3)
@@ -286,25 +341,48 @@ multi‑threaded server” §7.4 đòi. nginx “thuê” đúng OpenSSL ta buil
 ```sh
 bash scripts/build_nginx.sh
 ~/pqc/nginx/sbin/nginx -V             # phai in: built with OpenSSL 3.6.2 (nginx KHONG trong PATH)
-bash scripts/bench_tls_nginx.sh       # -> data/tls_handshake_nginx-x86_64.csv (do TLS tren 8443)
+WORKERS_LIST=1 TLS_ITERS=3 TLS_WARMUP=1 TLS_CONC=2 TLS_DUR=1 \
+  bash scripts/bench_tls_nginx.sh     # DEMO-FAST ~9s -> data/tls_handshake_nginx-x86_64.csv
+# (du truc don/da luong + so that: bo override -> WORKERS_LIST="1 auto", ITERS=50, DUR=10)
 ```
+> **Đã sửa 2 lỗi (lần chạy thử này):** (1) `nginx_bench.conf` có placeholder
+> `__LISTEN__` mà `bench_tls_nginx.sh` **quên thay** → config thành `listen
+> __LISTEN__:8443 ssl;` → nginx chết ngay (`host not found in "__LISTEN__:8443"`) →
+> **mọi ô đo fail**. Đã thêm biến `LISTEN` (mặc định `127.0.0.1`, đặt `LISTEN=0.0.0.0`
+> cho LAN §5.9) + thay `__LISTEN__`. (2) cùng lỗi `wait` treo như §4.5 — đã sửa
+> `wait $WPIDS`. Giờ chạy xong ~9 s, in đủ 9 dòng (1 worker × 3 cert × 3 group).
 **Kiểm đúng (tool có sẵn) — gồm xác nhận ĐÚNG LÀ HTTPS, không phải HTTP:**
+> ⚠ **Quan trọng (đã sửa so bản cũ):** `nginx -T`/`nginx -t` **trần** (không `-c`)
+> đọc **config MẶC ĐỊNH** `~/pqc/nginx/conf/nginx.conf` (`listen 80;`, KHÔNG ssl) —
+> KHÔNG phải config benchmark. `bench_tls_nginx.sh` lại render config vào thư mục tạm
+> rồi **xoá** khi xong, nên muốn kiểm phải **tự render + tự chạy nginx**. Khối dưới làm
+> đúng vậy (đã chạy kiểm: `nginx -t` PASS, `s_client` Verify=0, `curl` https 200 / http 400):
 ```sh
 ~/pqc/nginx/sbin/nginx -V 2>&1 | grep -i "built with OpenSSL"   # OpenSSL 3.6.x  <- thue dung nha
-~/pqc/nginx/sbin/nginx -T 2>&1 | grep -E "listen|ssl_protocols|ssl_certificate"   # phai thay 'listen 127.0.0.1:8443 ssl' + TLSv1.3
-~/pqc/nginx/sbin/nginx -t                                       # config OK; group bia -> SSL_CTX_set1_curves_list failed
-# bat tay TLS that voi nginx (chung minh HTTPS):
+ldd ~/pqc/nginx/sbin/nginx | grep -i ssl                        # link .so phai tro ~/pqc/openssl
+# 1) Render config benchmark THẬT (giong het bench_tls_nginx.sh, da co __LISTEN__):
+RUN=/tmp/ngx_check; rm -rf "$RUN"; mkdir -p "$RUN/logs" "$RUN/html"; echo ok > "$RUN/html/index.html"
+sed -e "s|__WORKERS__|1|" -e "s|__PORT__|8443|" -e "s|__LISTEN__|127.0.0.1|" \
+    -e "s|__CRT__|$HOME/pqc/tls/mldsa65.cert.pem|" -e "s|__KEY__|$HOME/pqc/tls/mldsa65.key.pem|" \
+    -e "s|__GROUPS__|X25519:X25519MLKEM768:MLKEM768|" \
+    scripts/nginx_bench.conf > "$RUN/bench.conf"
+# 2) Kiem CHINH config benchmark (phai thay 'listen 127.0.0.1:8443 ssl' + TLSv1.3):
+~/pqc/nginx/sbin/nginx -p "$RUN" -c bench.conf -T 2>&1 | grep -E "listen|ssl_protocols|ssl_certificate"
+~/pqc/nginx/sbin/nginx -p "$RUN" -c bench.conf -t          # syntax ok; group bia -> SSL_CTX_set1_curves_list failed
+# 3) Chay nginx (daemon off -> phai co '&') roi bat tay TLS that:
+~/pqc/nginx/sbin/nginx -p "$RUN" -c bench.conf &           # NGINX phai DANG CHAY cho buoc nay
+for _ in $(seq 1 20); do curl -k -s https://127.0.0.1:8443/ >/dev/null 2>&1 && break; sleep 0.3; done
 echo | ~/pqc/openssl/bin/openssl s_client -connect 127.0.0.1:8443 -tls1_3 \
   -groups X25519MLKEM768 -CAfile ~/pqc/tls/mldsa65.cert.pem 2>&1 \
-  | grep -E "Protocol|Cipher|group|Verify"     # TLSv1.3 + Verify return code: 0
-# bang chung cong la TLS-only (HTTPS), khong phai HTTP tran:
-curl -k https://127.0.0.1:8443/ -o /dev/null -s -w "https OK: %{http_code}\n"
-curl     http://127.0.0.1:8443/ -o /dev/null -s -w "http: %{http_code}  (400 = nginx tu choi HTTP tran tren cong TLS)\n"
-ldd "$(command -v nginx || echo ~/pqc/nginx/sbin/nginx)" | grep -i ssl   # phai tro ~/pqc/openssl
+  | grep -E "Protocol|Cipher|Negotiated|Verify return"     # TLSv1.3 + Verify return code: 0
+curl -k https://127.0.0.1:8443/ -o /dev/null -s -w "https: %{http_code}\n"   # 200
+curl     http://127.0.0.1:8443/ -o /dev/null -s -w "http:  %{http_code}\n"   # 400 (nginx tu choi HTTP tran tren cong TLS)
+~/pqc/nginx/sbin/nginx -p "$RUN" -c bench.conf -s stop 2>/dev/null           # tat nginx
 ```
-→ `s_client` ra `TLSv1.3` + `Verify return code: 0` = nginx phục vụ **HTTPS**; `curl
-http://…:8443` **bị từ chối/handshake lỗi** vì cổng chỉ nói TLS. Đó là bằng chứng cứng
-nginx là HTTPS chứ không phải HTTP.
+→ `nginx -c bench.conf -T` cho thấy **`listen 127.0.0.1:8443 ssl;` + `ssl_protocols
+TLSv1.3;`** (config thật); `s_client` ra `TLSv1.3` + `Verify return code: 0` = nginx
+phục vụ **HTTPS**; `curl http://…:8443` ra **400** vì cổng chỉ nói TLS. Đó là bằng
+chứng cứng nginx là HTTPS chứ không phải HTTP.
 **Nói trên video:** “nginx chạy **HTTPS/TLS 1.3** trên 8443 (cert ML‑DSA, group hybrid);
 so với phương án A, hiệu số = giá của một server thật + đa lõi.”
 
@@ -349,24 +427,26 @@ code. Ranh giới: **không tự chế crypto** (đúng định luật người 
   Finished verified = tương đương bấm giờ `SSL_accept`).
 - **Throughput** dưới C client đồng thời; **server đơn vs đa luồng** qua `--threads N`.
 **Lệnh quay (thư mục `tls13-scratch/`):**
+Demo-fast dưới đã chạy kiểm (~5 s tổng). Số trong ngoặc là bản “lấy số thật”.
 ```sh
 make                                         # build server/server + client/client
 make repro                                   # bang chung byte-exact vs RFC + repo
 make cert                                    # cert trong server/ (lan dau)
 mkdir -p ../data/raw/x86_64                   # de redirect CSV khong loi (neu chua co)
-# latency (client): server o server/, client o client/
-( cd server && ./server 8400 1100 ) &
-cd client && BENCH_ITERS=1000 ./client 127.0.0.1 8400 --bench --warmup 100 \
+# latency (client): server count = warmup + iters = 5 + 20 = 25  (that: 100+1000=1100)
+( cd server && ./server 8400 25 ) &
+cd client && BENCH_ITERS=20 ./client 127.0.0.1 8400 --bench --warmup 5 \
   --csv ../../data/raw/x86_64/tlsmini_d_latency.csv; cd ..   # --csv -> so vao data/, KHONG tao handshake_bench.csv trong source
-# throughput + server-side CSV, don luong (tu server//client/ la ../../data):
-( cd server && ./server 8400 20000 --threads 1 > ../../data/raw/x86_64/tlsmini_d_st.csv 2> run.log ) &
-( cd client && ./client 127.0.0.1 8400 --load --threads 16 --total 20000 --csv ../../data/raw/x86_64/load_d_st.csv )
+# throughput + server-side CSV, don luong: server count = client --total = 200 (that: 20000)
+( cd server && ./server 8400 200 --threads 1 > ../../data/raw/x86_64/tlsmini_d_st.csv 2> run.log ) &
+( cd client && ./client 127.0.0.1 8400 --load --threads 8 --total 200 --csv ../../data/raw/x86_64/load_d_st.csv )
 # da luong (so sanh):
-( cd server && ./server 8400 20000 --threads $(nproc) > ../../data/raw/x86_64/tlsmini_d_mt.csv 2> run.log ) &
-( cd client && ./client 127.0.0.1 8400 --load --threads 16 --total 20000 --csv ../../data/raw/x86_64/load_d_mt.csv )
+( cd server && ./server 8400 200 --threads $(nproc) > ../../data/raw/x86_64/tlsmini_d_mt.csv 2> run.log ) &
+( cd client && ./client 127.0.0.1 8400 --load --threads 8 --total 200 --csv ../../data/raw/x86_64/load_d_mt.csv )
 ```
-> Lưu ý: server `count` phải **bằng** client `--total` (server phục vụ đúng ngần ấy
-> kết nối rồi thoát; lệch nhau → server chờ kết nối không tới và treo).
+> Lưu ý: server `count` phải **bằng** client `--total` (hoặc `--warmup + iters` ở chế
+> độ `--bench`); server phục vụ đúng ngần ấy kết nối rồi thoát; lệch nhau → server chờ
+> kết nối không tới và treo. (Chạy kiểm: 25 và 200 khớp đúng, không treo.)
 **Kiểm đúng (tool có sẵn):**
 ```sh
 make repro          # in: ALL MATCH -> byte-identical to illustrated-tls13 + RFC 8446
@@ -377,10 +457,13 @@ echo ping | ~/pqc/openssl/bin/openssl s_client -connect 127.0.0.1:8400 -tls1_3 \
 # doi chung pha crypto:
 ~/pqc/openssl/bin/openssl speed ecdhx25519 ecdsap256
 ```
-`make repro` tái lập đúng từng byte `keylog.txt` của illustrated-tls13 → chứng minh
-key schedule khớp RFC; `s_client` báo `Verify return code: 0` + nhận “pong” →
-handshake tự viết đúng chuẩn. Số pha (ECDHE ~102µs) cùng cỡ `openssl speed` (~37µs
-thô) — chênh do tạo/huỷ object EVP mỗi handshake (chi phí thực per-connection).
+`make repro` tái lập đúng từng byte `keylog.txt` của illustrated-tls13 (chạy kiểm in
+`ALL MATCH -> byte-identical to illustrated-tls13 + RFC 8446`) → chứng minh key
+schedule khớp RFC; `s_client` (có `-quiet`) in `depth=0 ... verify return:1` rồi nhận
+**“pong”** → handshake tự viết đúng chuẩn. (Lưu ý: `-quiet` **giấu** dòng tổng `Verify
+return code: 0 (ok)`; bằng chứng ở đây là chữ “pong” + `verify return:1`. Bỏ `-quiet`
+nếu muốn thấy dòng `Verify return code: 0`.) Số pha (ECDHE ~100µs, chạy kiểm) cùng cỡ
+`openssl speed` (X25519 ~27k op/s) — chênh do tạo/huỷ object EVP mỗi handshake.
 **Nói trên video:** “Track D tự viết protocol; `make repro` chứng minh đúng từng
 byte so RFC, rồi đo handshake cùng cách A/B/C.”
 
@@ -397,25 +480,38 @@ Không có batch nào → tự fallback `summary_micro_<arch>.csv` (1 lần đo)
 **trong** analyze nên **mỗi file một vai trò**, **bỏ hẳn** bước cũ `cp summary_agg →
 summary_micro` (đè file canonical). `summary_micro` vẫn là "batch mới nhất", `summary_agg` là "bản gộp".
 
-**Gộp tay trên terminal (đối chứng — ra đúng `summary_agg_<arch>.csv` như analyze):**
+**Gộp tay trên terminal (đối chứng — phải BYTE-IDENTICAL với `make analyze`):**
+> ⚠ **Sửa quan trọng:** bản cũ format `{:.6g}` nên **KHÔNG** khớp `analyze.py` (analyze
+> dùng `fmt_val`: số nguyên giữ nguyên, không ký hiệu khoa học). Chạy kiểm cho thấy
+> bản `.6g` lệch **227 dòng** (vd `3220048` → `3.22005e+06`, `234592.5` → `234592`).
+> Bản cũ còn **ghi đè** thẳng `data/summary_agg_*.csv` (file chính). Bản dưới dùng đúng
+> `fmt_val`, ghi ra `/tmp` rồi `diff` — chạy kiểm: **IDENTICAL** cả `agg` lẫn `_spread`.
 ```sh
 python3 - "$(uname -m)" <<'PY'
 import csv, statistics, glob, sys
 from collections import defaultdict
+def fmt_val(x):                       # GIONG HET analyze.py (khong dung .6g)
+    x = float(x)
+    if x == int(x): return str(int(x))
+    if abs(x) >= 1: return f"{x:.3f}".rstrip("0").rstrip(".")
+    return f"{x:.4g}"
 arch = sys.argv[1]; s = defaultdict(list)
 for f in sorted(glob.glob(f"data/raw/{arch}/summary_batch*.csv")):
     for r in csv.DictReader(open(f)):
         try: s[(r["algo"], r["metric"])].append(float(r["value"]))
         except ValueError: pass
-agg = open(f"data/summary_agg_{arch}.csv", "w"); agg.write("algo,metric,value\n")
-spr = open(f"data/summary_agg_{arch}_spread.csv", "w"); spr.write("algo,metric,n,median,mean,min,max,cv_pct\n")
-for (a, m), v in sorted(s.items()):
-    md = statistics.median(v); mn = statistics.fmean(v)
-    sd = statistics.stdev(v) if len(v) > 1 else 0.0
-    agg.write(f"{a},{m},{md:.6g}\n")
-    spr.write(f"{a},{m},{len(v)},{md:.6g},{mn:.6g},{min(v):.6g},{max(v):.6g},{100*sd/mn if mn else 0:.2f}\n")
-print(f"wrote data/summary_agg_{arch}.csv (+ _spread.csv) tu {len(glob.glob(f'data/raw/{arch}/summary_batch*.csv'))} batch")
+with open("/tmp/agg_chk.csv","w",newline="") as agg, open("/tmp/spread_chk.csv","w",newline="") as spr:
+    agg.write("algo,metric,value\n"); spr.write("algo,metric,n,median,mean,min,max,cv_pct\n")
+    for (a, m), v in sorted(s.items()):
+        md = statistics.median(v); mn = statistics.fmean(v)
+        sd = statistics.stdev(v) if len(v) > 1 else 0.0; cv = (100*sd/mn) if mn else 0.0
+        agg.write(f"{a},{m},{fmt_val(md)}\n")
+        spr.write(f"{a},{m},{len(v)},{fmt_val(md)},{fmt_val(mn)},{fmt_val(min(v))},{fmt_val(max(v))},{cv:.2f}\n")
+print(f"wrote /tmp/agg_chk.csv (+ /tmp/spread_chk.csv) tu {len(glob.glob(f'data/raw/{arch}/summary_batch*.csv'))} batch")
 PY
+# doi chung: phai khong co dong nao lech
+diff data/summary_agg_$(uname -m).csv /tmp/agg_chk.csv && echo "AGG IDENTICAL voi analyze"
+diff data/summary_agg_$(uname -m)_spread.csv /tmp/spread_chk.csv && echo "SPREAD IDENTICAL voi analyze"
 ```
 
 **Analyze gom HẾT mọi cách đo (không sót CSV nào):** `make analyze` quét **cả**
@@ -426,9 +522,12 @@ WP5 peak-RSS + code-size, WP3 liboqs ref/opt, và **WP4 cả 4 cách** — A `s_
 `tlsmini_d_*` / `load_d_*`), cùng **D phân pha** (`Track D handshake phases`:
 keygen / ECDHE / key-sched / sig-verify từ `tlsmini_d_latency.csv`).
 
-**Kiểm đúng:** mở `analysis_out/tables.md`; bảng “liboqs ref vs opt” có speedup
-×2.6–2.9 nghĩa là chuỗi WP3 thông suốt từ binary tới biểu đồ. Có 5 batch thì analyze
-in dòng `median-of-medians over 5 batch(es)` và sinh `data/summary_agg_x86_64.csv`.
+**Kiểm đúng:** mở `analysis_out/tables.md`; bảng “liboqs ref vs opt” có speedup >×1
+(chạy kiểm x86_64: ×3.2–×5.9) nghĩa là chuỗi WP3 thông suốt từ binary tới biểu đồ.
+Demo 2 batch → analyze in `median-of-medians over 2 batch(es)` và sinh
+`data/summary_agg_x86_64.csv` (+ `_spread.csv`); bản “lấy số thật” 5 batch in `over 5
+batch(es)`. Chạy kiểm: analyze sinh **8 nhóm bảng + 29 PNG** (cần `matplotlib`; thiếu
+thì chỉ có bảng — `pip install matplotlib` hoặc gói `python3-matplotlib`).
 **Nói trên video:** “Toàn bộ số gom thành bảng đối chiếu giả thuyết; 5 batch được gộp
 median-of-medians **ngay trong analyze** — không file thừa, không cp đè.”
 
@@ -440,10 +539,10 @@ sudo tshark -i lo -f "tcp port 4433" -a duration:5 -q -z conv,tcp
 wrk -t4 -c16 -d10s https://127.0.0.1:8443/
 # tai nang hon:
 TLS_CONC=8 TLS_DUR=15 make tls
-# tai lap (CHU Y: repo CHUA co docker/Dockerfile.x86_64 -- phai tao Dockerfile truoc;
-#           scripts/docker_buildx.sh cung tro toi dung file nay nen cung loi neu thieu):
-# docker build -f docker/Dockerfile.x86_64 -t nt219-pqc .
-git add data analysis_out docs && git commit -m "x86 measurements" && git push
+# tai lap: docker/Dockerfile.x86_64 GIO DA CO san trong repo (build duoc; chi la bang
+#          chung dong goi, KHONG do trong container). scripts/docker_buildx.sh tro dung file nay.
+# docker build -f docker/Dockerfile.x86_64 -t nt219-pqc .   # (can Docker; mac dinh moi truong khong co)
+git add data analysis_out docs scripts && git commit -m "x86 measurements" && git push
 ```
 > **Định luật:** không bao giờ đo trong Docker/QEMU — số của trình giả lập. `wrk`
 > chỉ là **đối chứng công cụ** trên hàng cổ điển, **không** dùng cho số PQC.
@@ -495,6 +594,10 @@ for i in 1 2 3 4 5; do                            # (2) K=5 batch
   sleep 120                                         # (6) nghi 2 phut cho ha nhiet
 done
 ```
+> **DEMO-FAST trên Pi:** muốn quay nhanh, dùng đúng bộ như §4.2 — `for i in 1 2; do
+> MICRO_ALGOS="mlkem 768;mldsa 65;rsa 3072" BENCH_WARMUP=0 BENCH_ITERS=1
+> BENCH_KEYGEN_ITERS=1 make bench; ...; sleep 5; done` (bỏ RSA-15360 nên không cần
+> nghỉ nguội lâu). Bản “lấy số thật” mới dùng `BENCH_ITERS=1500` + `sleep 120` như trên.
 **Tại sao:** vòng thấp + nghỉ nguội giữ Pi **dưới ngưỡng throttle** để batch sau
 không chậm hơn batch trước **vì nhiệt** (chứ không phải vì thuật toán). Vòng `(4b)`
 **y hệt §4.2 (x86)**: gom raw+kv từng thuật toán theo batch vào `data/raw/aarch64/<algo>/`
@@ -526,23 +629,28 @@ bash scripts/gen_tls_certs.sh           # khoa la tai san theo may, khong copy c
 
 ### 5.5 — WP4 A/B/C (lệnh y hệt x86)
 ```sh
-make tls                                # A: s_server
+TLS_ITERS=3 TLS_WARMUP=1 TLS_CONC=2 TLS_DUR=1 make tls   # A: s_server (DEMO-FAST)
 bash scripts/build_nginx.sh             # Pi ~5-10 phut (KHONG rebuild OpenSSL - link dong)
-bash scripts/bench_tls_nginx.sh         # B: nginx (TLS_ITERS=30 neu muon ngan)
+WORKERS_LIST=1 TLS_ITERS=3 TLS_WARMUP=1 TLS_CONC=2 TLS_DUR=1 \
+  bash scripts/bench_tls_nginx.sh       # B: nginx (DEMO-FAST)
 # C: tls_mini_server + tls_timer_client (2 cua so, nhu 4.7)
 ```
+> **Áp dụng cả hai bản sửa §4.5/§4.6** (đã vá trong script, dùng chung cho ARM): `make
+> tls` và `bench_tls_nginx.sh` không còn treo ở `wait`; nginx có `__LISTEN__` đúng. Lệnh
+> kiểm nginx HTTPS: render + chạy như §4.6 (bench config, không phải `nginx -T` trần).
 
 ### 5.6 — Track D trên ARM (TLS tự viết — đo handshake)
 **Lệnh quay (trong `tls13-scratch/`):**
 ```sh
-make && make repro                      # repro byte-exact tren ARM
+make && make repro                      # repro byte-exact tren ARM (in ALL MATCH)
 make cert
 mkdir -p ../data/raw/aarch64
-( cd server && ./server 8400 1100 ) &
-( cd client && BENCH_ITERS=1000 ./client 127.0.0.1 8400 --bench --warmup 100 \
+# DEMO-FAST (count = warmup+iters = 25; total = 200) -- nhu §4.8; ban that: 1100 / 20000
+( cd server && ./server 8400 25 ) &
+( cd client && BENCH_ITERS=20 ./client 127.0.0.1 8400 --bench --warmup 5 \
     --csv ../../data/raw/aarch64/tlsmini_d_latency.csv )   # --csv -> data/, tranh handshake_bench.csv rac
-( cd server && ./server 8400 20000 --threads $(nproc) > ../../data/raw/aarch64/tlsmini_d_mt.csv 2> run.log ) &
-( cd client && ./client 127.0.0.1 8400 --load --threads 16 --total 20000 --csv ../../data/raw/aarch64/load_d_mt.csv )
+( cd server && ./server 8400 200 --threads $(nproc) > ../../data/raw/aarch64/tlsmini_d_mt.csv 2> run.log ) &
+( cd client && ./client 127.0.0.1 8400 --load --threads 8 --total 200 --csv ../../data/raw/aarch64/load_d_mt.csv )
 ```
 **Kiểm đúng:** `make repro` ALL MATCH (cùng giá trị vàng trên ARM vì là số học, không
 phụ thuộc kiến trúc); interop `openssl s_client` như §4.8.
@@ -602,9 +710,9 @@ RQ1/RQ2/RQ3 đọc từ `analysis_out/tables.md`.”
 | Môi trường | `which openssl`, `openssl version`, `verify_env.sh`, `ldd` | trỏ `~/pqc/openssl`; in `3.6.2`; PASS; binary link đúng OpenSSL ta |
 | OpenSSL có PQC | `openssl list -kem-algorithms \| grep ML-KEM` | thấy ML-KEM-512/768/1024 |
 | WP2 micro | `openssl speed`, cycles ratio, KAT | cùng cỡ với speed; tỉ lệ thời gian ≈ tỉ lệ chu kỳ |
-| WP3 ref/opt | banner `speed_kem` | ref in `SSE/SSE2`; opt in `AVX2`(x86)/`NEON`(ARM) |
+| WP3 ref/opt | dòng `CPU exts compile-time:` của `speed_kem` | ref: `SSE SSE2`; opt: `… AVX AVX2 …`(x86)/`NEON`(ARM); speedup ref/opt phụ thuộc CPU (x86 chạy kiểm ×3.2–×5.9) |
 | WP5 | `size -t` (TOTALS), `readelf -S`, `/usr/bin/time -v` | per-scheme: `size -t … \| tail -1` = tổng (KHÔNG tin cột `libcrypto.a` trong CSV — bug NR==2); `libcrypto.so` khớp CSV; "Maximum resident set size" khớp `peak_rss_kb` (mọi algo ~8MB = baseline) |
-| WP4 A/B/C | `openssl s_client -CAfile` (cần s_server đang chạy, xem 4.5), `~/pqc/nginx/sbin/nginx -V/-T/-t` (xem `listen 127.0.0.1:8443 ssl` + TLSv1.3), `curl http://…:8443` → 400, `tshark -z conv,tcp` | `Verify return code: 0`; nginx là **HTTPS** không phải HTTP; built with OpenSSL 3.6; group bịa → fail-loudly; bytes cert PQC lớn hơn |
+| WP4 A/B/C | `openssl s_client -CAfile` (cần server **đang chạy**, xem 4.5/4.6), `nginx -V` + `nginx -p RUN -c bench.conf -T/-t` (KHÔNG `-T` trần — nó đọc config mặc định `listen 80`), `curl http://…:8443`→400, `tshark -z conv,tcp` | `Verify return code: 0`; `nginx -c bench.conf -T` thấy `listen …:8443 ssl`+TLSv1.3; built with OpenSSL 3.6; group bịa → fail-loudly; bytes cert PQC lớn hơn (mldsa65 7517B ≫ rsa2048 1115B) |
 | group thật | cột `group` trong CSV (`SSL_get_negotiated_group`) | `X25519MLKEM768` |
 | **Track D** | `make repro`, `openssl s_client`, `openssl speed` | **ALL MATCH** (byte-exact); `Verify return code: 0` + “pong”; pha cùng cỡ speed |
 | Cross-compile | `file <lib>` | `ARM aarch64` |
@@ -620,11 +728,11 @@ chấp nhận handshake của ta), và với track D thêm `make repro` (đúng 
 
 **Máy x86_64:**
 - [ ] `verify_env` PASS + `openssl version` = 3.6.2
-- [ ] 5 file batch trong `data/raw/x86_64/`
+- [ ] file batch trong `data/raw/x86_64/` (demo: `summary_batch1..2`; số thật: `1..5`)
 - [ ] `memory` / `codesize` / `liboqs_speed` / `tls_handshake*` CSV có số
-- [ ] WP4: `s_client` báo Verify=0 trên cả 3 cert; `~/pqc/nginx/sbin/nginx -V` OpenSSL 3.6
+- [ ] WP4: `make tls` & nginx **chạy xong** (không treo) + `s_client` Verify=0 trên cả 3 cert; `nginx -V` OpenSSL 3.6
 - [ ] **Track D**: `make repro` ALL MATCH; latency + throughput (đơn & đa luồng)
-- [ ] `analysis_out/tables.md` + PNG
+- [ ] `analysis_out/tables.md` + PNG (cần `matplotlib`)
 - [ ] đã `git push`
 
 **Máy ARM:**
@@ -666,9 +774,26 @@ chấp nhận handshake của ta), và với track D thêm `make repro` (đúng 
    kèm `--csv ../../data/raw/<arch>/tlsmini_d_latency.csv` → số rơi vào `data/`, không vào source.
 10. **Hai điểm script đã biết (không phá demo, nhưng đừng tin nhầm số):** (a)
     `measure_codesize.sh` đọc `awk 'NR==2'` → cột `libcrypto.a` trong CSV chỉ là object
-    ĐẦU của kho, KHÔNG phải tổng; chỉ tin `libcrypto.so` + per-scheme `size -t` (§4.3).
-    (b) `measure_memory.sh` chạy 12 algo (có rsa-2048, thiếu rsa-7680/15360 + p521) — khác
-    matrix 15 algo của WP2; nhưng peak RSS không phân biệt được nên không ảnh hưởng kết luận.
+    ĐẦU của kho (chạy kiểm: **2653 B**, KHÔNG phải tổng); chỉ tin `libcrypto.so` (~6.5 MB)
+    + per-scheme `size -t` (§4.3). CSV còn có **2 dòng cùng tên `liboqs.so`** (ref ~5 MB vs
+    opt/neon ~11 MB) — phân biệt bằng kích thước. (b) `measure_memory.sh` chạy 12 algo (có
+    rsa-2048, thiếu rsa-7680/15360 + p521) — khác matrix 15 algo của WP2; nhưng peak RSS
+    không phân biệt được nên không ảnh hưởng kết luận.
+
+> **11–13: ba lỗi đã PHÁT HIỆN & SỬA khi chạy thử toàn bản (đừng để tái phát):**
+
+11. **`make tls` & `bench_tls_nginx.sh` từng TREO VÔ HẠN** (không ra dòng nào, CSV chỉ có
+    header). Nguyên nhân: pha throughput gọi `wait` (không tham số) → chờ luôn cả tiến
+    trình **server nền** (s_server/nginx chạy mãi). **Đã sửa** → `wait $WPIDS` (chỉ chờ
+    worker). Nếu thấy treo lại: kiểm `wait` trong hai script có còn tham số PID không.
+12. **`bench_tls_nginx.sh` nginx không khởi động** vì `nginx_bench.conf` có `__LISTEN__`
+    mà script **quên thay** → `listen __LISTEN__:8443 ssl;` → `host not found`. **Đã sửa**:
+    thêm biến `LISTEN` (mặc định `127.0.0.1`; `LISTEN=0.0.0.0` cho LAN) + thay trong `sed`.
+    Lệnh kiểm `nginx -T`/`-t` **trần** vô dụng (đọc config mặc định `listen 80`) — phải
+    `nginx -p RUN -c bench.conf -T` trên config đã render (§4.6).
+13. **Đối chứng gộp K-batch tay (§4.9) từng KHÔNG khớp analyze** vì format `.6g` (lệch
+    227 dòng: vd `3220048`→`3.22005e+06`). **Đã sửa**: dùng `fmt_val` y hệt analyze, ghi
+    `/tmp` rồi `diff` (chạy kiểm: IDENTICAL). Đừng để bản `.6g` ghi đè `summary_agg_*`.
 
 ---
 
