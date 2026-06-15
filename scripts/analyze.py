@@ -14,6 +14,7 @@
 # Usage : python3 scripts/analyze.py        (from repo root or anywhere)
 # =============================================================================
 import csv
+import statistics
 import sys
 from pathlib import Path
 from collections import defaultdict
@@ -44,6 +45,19 @@ def fnum(x):
         return float(x)
     except (TypeError, ValueError):
         return None
+
+
+def fmt_val(x):
+    """Plain decimal for the summary_agg CSV: full precision for whole numbers,
+    NO scientific notation. Replaces f"{x:.6g}" which both turned big counts into
+    1.20804e+06 AND truncated to 6 sig-figs (e.g. true median 1208040.5 -> 1208040,
+    losing the .5). Whole -> int; |x|>=1 -> trimmed decimals; tiny -> 4 sig-figs."""
+    x = float(x)
+    if x == int(x):
+        return str(int(x))
+    if abs(x) >= 1:
+        return f"{x:.3f}".rstrip("0").rstrip(".")
+    return f"{x:.4g}"
 
 
 def md_table(headers, rows):
@@ -77,19 +91,60 @@ def bar_chart(labels, series, title, ylabel, fname, log=False):
     print(f"  chart: analysis_out/{fname}")
 
 
-report = ["# Benchmark analysis\n"]
-arches = sorted({p.stem.removeprefix("summary_micro_") for p in DATA.glob("summary_micro_*.csv")})
-
-# ---- 1) Microbenchmark latency (WP2): long format algo,metric,value --------
-micro = {}  # arch -> algo -> metric -> value
-for arch in arches:
-    rows = read_csv(DATA / f"summary_micro_{arch}.csv")
+def load_micro(arch):
+    """WP2 source for one arch. Prefer the K independent batches
+    (data/raw/<arch>/summary_batch*.csv) and report the MEDIAN-OF-MEDIANS, also
+    writing summary_agg_<arch>.csv (+ _spread.csv: n,median,mean,min,max,cv_pct;
+    cv = batch-to-batch noise, high = unstable e.g. RSA keygen). Fall back to the
+    single latest summary_micro_<arch>.csv when no batches were archived.
+    Returns algo -> metric -> value. This is the merge step folded INTO analyze:
+    no separate script and no 'cp summary_agg summary_micro' overwrite needed."""
     table = defaultdict(dict)
-    for r in rows:
-        v = fnum(r.get("value"))
-        if v is not None:
-            table[r["algo"]][r["metric"]] = v
-    micro[arch] = table
+    batches = sorted((DATA / "raw" / arch).glob("summary_batch*.csv"))
+    if batches:
+        samples = defaultdict(list)          # (algo, metric) -> [v_batch1, ...]
+        for b in batches:
+            for r in read_csv(b):
+                v = fnum(r.get("value"))
+                if v is not None:
+                    samples[(r["algo"], r["metric"])].append(v)
+        agg = DATA / f"summary_agg_{arch}.csv"
+        spread = DATA / f"summary_agg_{arch}_spread.csv"
+        with open(agg, "w", newline="") as fa, open(spread, "w", newline="") as fs:
+            wa = csv.writer(fa, lineterminator="\n")
+            ws = csv.writer(fs, lineterminator="\n")
+            wa.writerow(["algo", "metric", "value"])
+            ws.writerow(["algo", "metric", "n", "median", "mean",
+                         "min", "max", "cv_pct"])
+            for (algo, metric), vals in sorted(samples.items()):
+                med = statistics.median(vals)
+                mean = statistics.fmean(vals)
+                sd = statistics.stdev(vals) if len(vals) > 1 else 0.0
+                cv = (100.0 * sd / mean) if mean else 0.0
+                wa.writerow([algo, metric, fmt_val(med)])
+                ws.writerow([algo, metric, len(vals), fmt_val(med), fmt_val(mean),
+                             fmt_val(min(vals)), fmt_val(max(vals)), f"{cv:.2f}"])
+                table[algo][metric] = med
+        print(f"  WP2 {arch}: median-of-medians over {len(batches)} batch(es) "
+              f"-> data/{agg.name} (+ _spread.csv)")
+    elif (DATA / f"summary_micro_{arch}.csv").exists():
+        for r in read_csv(DATA / f"summary_micro_{arch}.csv"):
+            v = fnum(r.get("value"))
+            if v is not None:
+                table[r["algo"]][r["metric"]] = v
+        print(f"  WP2 {arch}: single batch (summary_micro_{arch}.csv)")
+    return table
+
+
+report = ["# Benchmark analysis\n"]
+# An arch counts if it has a single summary OR archived K-batches.
+_batch_arches = {d.name for d in (DATA / "raw").glob("*")
+                 if d.is_dir() and any(d.glob("summary_batch*.csv"))}
+arches = sorted({p.stem.removeprefix("summary_micro_")
+                 for p in DATA.glob("summary_micro_*.csv")} | _batch_arches)
+
+# ---- 1) Microbenchmark latency (WP2): median-of-medians over K batches ------
+micro = {arch: load_micro(arch) for arch in arches}  # arch -> algo -> metric -> value
 
 for arch, table in micro.items():
     medians = sorted({m for a in table.values() for m in a if "median" in m})
@@ -200,6 +255,61 @@ for p in sorted(DATA.glob("liboqs_speed_*.csv")):
     bar_chart(labels, [("opt vs ref", [sp for *_, sp in pairs])],
               f"Optimization speedup ref->opt ({arch})", "x times",
               f"liboqs_speedup_{arch}.png")
+
+# ---- 6) Self-implemented TLS handshake (methods C, D) ----------------------
+# These per-connection CSVs live under data/raw/<arch>/ (NOT data/), so the
+# globs above never saw them. Summarise handshake_us per method + the track-D
+# client phase breakdown (the phases that change when swapping classical<->PQC).
+def _pctile(sorted_vals, q):
+    if not sorted_vals:
+        return None
+    return sorted_vals[min(len(sorted_vals) - 1, max(0, int(q * len(sorted_vals))))]
+
+SELFIMPL = [  # (label, filename, value_column, has_group_column)
+    ("C tls_mini (server SSL_accept)", "tlsmini_handshakes.csv", "handshake_us", True),
+    ("D track server, 1-thread",       "tlsmini_d_st.csv",       "handshake_us", True),
+    ("D track server, multi-thread",   "tlsmini_d_mt.csv",       "handshake_us", True),
+    ("D track client load, st-server", "load_d_st.csv",          "handshake_us", False),
+    ("D track client load, mt-server", "load_d_mt.csv",          "handshake_us", False),
+]
+for d in sorted((DATA / "raw").glob("*")):
+    if not d.is_dir():
+        continue
+    arch = d.name
+    rows = []
+    for label, fname, col, has_grp in SELFIMPL:
+        f = d / fname
+        if not f.exists():
+            continue
+        drows = read_csv(f)
+        vals = sorted(v for v in (fnum(r.get(col)) for r in drows) if v is not None)
+        if not vals:
+            continue
+        grp = "-"
+        if has_grp and drows and "group" in drows[0]:
+            grp = ",".join(sorted({r["group"] for r in drows if r.get("group")})) or "-"
+        rows.append([label, grp, len(vals),
+                     f"{statistics.median(vals):.1f}", f"{_pctile(vals, 0.95):.1f}"])
+    if rows:
+        report.append(f"\n## Self-implemented TLS handshake - methods C/D ({arch})\n")
+        report.append(md_table(["method", "group", "n", "median_us", "p95_us"], rows))
+        bar_chart([r[0] for r in rows], [("median us", [float(r[3]) for r in rows])],
+                  f"Self-impl TLS handshake median ({arch})", "us",
+                  f"selfimpl_tls_{arch}.png", log=True)
+    pf = d / "tlsmini_d_latency.csv"   # track-D client per-phase breakdown
+    if pf.exists():
+        prows = read_csv(pf)
+        prow = []
+        for ph in ["total_us", "keygen_us", "ecdhe_us", "key_sched_us", "sig_verify_us"]:
+            vals = sorted(v for v in (fnum(r.get(ph)) for r in prows) if v is not None)
+            if vals:
+                prow.append([ph, len(vals), f"{statistics.median(vals):.1f}",
+                             f"{_pctile(vals, 0.95):.1f}"])
+        if prow:
+            report.append(f"\n## Track D handshake phases, client side ({arch})\n")
+            report.append(md_table(["phase", "n", "median_us", "p95_us"], prow))
+            bar_chart([p[0] for p in prow], [("median us", [float(p[2]) for p in prow])],
+                      f"Track D phases median ({arch})", "us", f"trackd_phases_{arch}.png")
 
 (OUT / "tables.md").write_text("\n".join(report))
 print(f"DONE. Tables: analysis_out/tables.md"

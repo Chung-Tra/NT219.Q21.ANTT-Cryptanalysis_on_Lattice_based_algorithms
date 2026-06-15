@@ -27,7 +27,7 @@ mkdir -p "$RAWDIR"
 
 # Algorithm matrix: "family param". Edit freely.
 ALGOS=(
-  "rsa 2048" "rsa 3072" "rsa 15360"
+  "rsa 3072" "rsa 7680" "rsa 15360"
   "ecdsa p256" "ecdsa p384" "ecdsa p521"
   "ecdh p256" "ecdh p384" "ecdh p521"
   "mlkem 512" "mlkem 768" "mlkem 1024"
