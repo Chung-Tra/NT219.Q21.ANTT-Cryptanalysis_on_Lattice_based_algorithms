@@ -198,6 +198,7 @@ từ PQClean** (mỗi scheme một file `.a`).
 ```sh
 make memory      # -> data/memory_x86_64.csv (algo, peak_rss_kb)
 make codesize    # -> data/codesize_x86_64.csv (file,text,data,bss,total)
+bash scripts/fetch_pqclean.sh clean
 size ~/pqc/src/PQClean/crypto_*/ml-*/clean/lib*.a | tee data/raw/x86_64/pqclean_clean_size.txt
 ```
 **Kiểm đúng (tool có sẵn):**
