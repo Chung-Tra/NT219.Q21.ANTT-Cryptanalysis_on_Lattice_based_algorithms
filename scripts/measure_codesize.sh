@@ -37,8 +37,11 @@ fi
 echo "file,text_bytes,data_bytes,bss_bytes,total_bytes" > "$OUT"
 for f in $LIBS; do
   [ -f "$f" ] || continue
-  # `size` row: text data bss dec hex filename  (dec = total decimal bytes)
-  read -r text data bss dec < <(size "$f" 2>/dev/null | awk 'NR==2{print $1,$2,$3,$4}')
+  # Use `size -t` and read the (TOTALS) line (last row): for a .so it equals the
+  # single object row, but for a .a (archive = MANY object rows) it is the true
+  # SUM. Plain `size | awk NR==2` took only the FIRST object of an archive
+  # (so libcrypto.a / per-scheme .a came out far too small). text data bss dec.
+  read -r text data bss dec < <(size -t "$f" 2>/dev/null | tail -1 | awk '{print $1,$2,$3,$4}')
   if [ -n "${text:-}" ]; then
     echo "$(basename "$f"),${text},${data},${bss},${dec}" >> "$OUT"
     echo "==> $(basename "$f"): text=${text} data=${data} bss=${bss} total=${dec} bytes"
