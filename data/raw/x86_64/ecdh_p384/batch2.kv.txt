@@ -1,0 +1,26 @@
+openssl: OpenSSL 3.6.2 7 Apr 2026
+algo: ecdh-P-384
+keygen-iters: 200
+keygen-wall-median-ns: 468941.0
+keygen-wall-mean-ns: 470474.5
+keygen-wall-std-ns: 6071.8
+keygen-wall-p95-ns: 479144.0
+keygen-wall-p99-ns: 499394.0
+keygen-wall-ci95lo-ns: 469633.0
+keygen-wall-ci95hi-ns: 471316.1
+keygen-cyc-median: 1260452.0
+keygen-cyc-mean: 1264567.1
+keygen-persec: 2132.5
+derive-iters: 2000
+derive-wall-median-ns: 457388.0
+derive-wall-mean-ns: 457998.4
+derive-wall-std-ns: 3026.4
+derive-wall-p95-ns: 462959.0
+derive-wall-p99-ns: 468697.0
+derive-wall-ci95lo-ns: 457865.7
+derive-wall-ci95hi-ns: 458131.0
+derive-cyc-median: 1229398.0
+derive-cyc-mean: 1231038.6
+derive-persec: 2186.3
+size-key-bits: 384
+size-pubkey-bytes: 97
