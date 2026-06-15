@@ -79,13 +79,14 @@ for cert in $CERTS; do
             printf "%.3f %.3f %.3f", m/1000, s/NR/1000, p/1000 }')"
     rm -f "$TMP"
     # ---- throughput: CONC parallel workers for DUR seconds ----
-    CNTDIR="$(mktemp -d)"
+    CNTDIR="$(mktemp -d)"; WPIDS=""
     for w in $(seq 1 "$CONC"); do
       ( n=0; end=$(( $(date +%s) + DUR ))
         while [ "$(date +%s)" -lt "$end" ]; do one_handshake "$grp" "$CRT" && n=$((n+1)); done
         echo "$n" > "$CNTDIR/$w" ) &
+      WPIDS="$WPIDS $!"
     done
-    wait
+    wait $WPIDS          # wait ONLY for the workers, not the background s_server (bare 'wait' would hang on it)
     TOTAL=$(cat "$CNTDIR"/* | awk '{s+=$1} END{print s}')
     rm -rf "$CNTDIR"
     TPS=$(awk -v t="$TOTAL" -v d="$DUR" 'BEGIN{printf "%.1f", t/d}')
