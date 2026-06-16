@@ -10,12 +10,13 @@ cd "$HERE"
 sudo cpupower frequency-set -g performance 2>/dev/null || true
 
 ARCH="$(uname -m)"
+START="${START:-1}"
 BATCHES="${BATCHES:-5}"
 FAST="rsa 3072;ecdsa p256;ecdsa p384;ecdsa p521;ecdh p256;ecdh p384;ecdh p521;mlkem 512;mlkem 768;mlkem 1024;mldsa 44;mldsa 65;mldsa 87"
 SLOW="rsa 7680;rsa 15360"
 
 mkdir -p "data/raw/${ARCH}"
-for i in $(seq 1 "$BATCHES"); do
+for i in $(seq "$START" "$BATCHES"); do 
   echo "===== BATCH $i / $BATCHES  ($ARCH) ====="
 
   # --- Luot 1: 13 thuat toan con lai -- 2000 vong ---
@@ -41,4 +42,4 @@ for i in $(seq 1 "$BATCHES"); do
     [ "$i" -lt "$BATCHES" ] && sleep 120
   fi
 done
-echo "DONE. $BATCHES batch -> data/raw/${ARCH}/summary_batch*.csv (+ per-algo). Tiep theo: make analyze"
+echo "DONE. batch $START..$BATCHES -> data/raw/${ARCH}/summary_batch*.csv (+ per-algo). Tiep theo: make analyze"
