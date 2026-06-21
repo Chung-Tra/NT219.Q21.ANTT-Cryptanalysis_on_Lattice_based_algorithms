@@ -1,0 +1,6 @@
+algo,op,iter,wall_ns,cycles
+rsa-3072,keygen,0,219791728,590797240
+rsa-3072,pss-sign,0,2537560,6820710
+rsa-3072,pss-verify,0,55607,149322
+rsa-3072,oaep-encrypt,0,56885,152750
+rsa-3072,oaep-decrypt,0,2433948,6542274

@@ -28,7 +28,9 @@
 #define TLS13_H
 
 #include <stdint.h>
+#include <openssl/evp.h>
 #include <stddef.h>
+
 
 /* ---- Record ContentType (RFC 8446 section 5.1) -------------------------- */
 enum {
@@ -64,11 +66,43 @@ enum {
 #define TLS13_VERSION             0x0304  /* RFC 8446 section 4.2.1          */
 #define LEGACY_VERSION            0x0303  /* "TLS 1.2" on the wire           */
 #define SIG_ECDSA_SECP256R1_SHA256 0x0403 /* RFC 8446 section 4.2.3          */
-
+#define HS_CLIENT_KEM_CT  200 
 #define HASH_LEN  48   /* SHA-384 output                                     */
 #define KEY_LEN   32   /* AES-256 key                                        */
 #define IV_LEN    12   /* AEAD nonce                                         */
 #define TAG_LEN   16   /* AES-GCM tag                                        */
+
+/* ============================ algorithm-agility layer ====================
+ * Lets client.c / server.c pick a key-exchange + signature pairing at
+ * runtime instead of being hard-wired to X25519 + ECDSA P-256. The record
+ * layer, key schedule, and AEAD above are untouched -- this only swaps out
+ * *which* asymmetric primitives feed the handshake.
+ * ===========================================================================*/
+typedef enum {
+    MODE_ECC = 0,  /* Classical baseline : X25519 KEX        + ECDSA P-256 sig   */
+    MODE_RSA = 1,  /* Large legacy       : RSA-3072 KEX (OAEP) + RSA-3072 PSS sig */
+    MODE_PQC = 2,  /* Post-quantum       : ML-KEM-512 KEX     + ML-DSA-65 sig     */
+} crypto_mode_t;
+
+#define RSA_KEX_MODULUS_BITS   3072
+#define RSA_SIG_MODULUS_BITS   3072
+#define RSA_SHARED_SECRET_LEN  32   /* random secret wrapped via RSA-OAEP        */
+
+/* Human-readable name for logs / transcripts, e.g. "ML-KEM-512". */
+const char *crypto_mode_name(crypto_mode_t mode);
+const char *sig_mode_name(crypto_mode_t mode);
+
+/* A heap-owned, dynamically-sized byte buffer. Every wrapper below sizes its
+ * outputs from the chosen algorithm's actual key/ciphertext/signature length
+ * (32 B for X25519, ~384 B for RSA-3072, 1184/1088/32 B for ML-KEM-512, etc.)
+ * instead of forcing a fixed-size buffer that only fits the smallest case.
+ * Caller owns the result and must dynbuf_free() it.                          */
+typedef struct {
+    uint8_t *data;
+    size_t   len;
+} dynbuf_t;
+
+void dynbuf_free(dynbuf_t *b);
 
 /* ============================ growable byte buffer ======================= */
 /* Tiny helper used both to build outgoing messages and to accumulate the
@@ -118,6 +152,53 @@ int aead_open(const uint8_t key[KEY_LEN], const uint8_t base_iv[IV_LEN],
               uint64_t seq, const uint8_t *aad, size_t aadlen,
               const uint8_t *ct, size_t ctlen, uint8_t *out /*ctlen-TAG*/);
 
+/* ============================ agile KEX wrappers ==========================
+ * Unifies three very different key-exchange shapes behind one KEM-style
+ * interface (generate / encapsulate / decapsulate):
+ *   MODE_ECC : X25519 has no native ciphertext, so encapsulate() generates
+ *              a fresh ephemeral X25519 keypair internally and ships its
+ *              public key *as* the "ciphertext"; both sides end up running
+ *              the same ECDH formula. This is the standard "DH-as-KEM"
+ *              construction and keeps the call sites identical across modes.
+ *   MODE_RSA : encapsulate() draws a random 32-byte secret and wraps it with
+ *              RSA-OAEP under the peer's RSA-3072 public key; decapsulate()
+ *              unwraps it with the matching private key.
+ *   MODE_PQC : encapsulate()/decapsulate() call straight through to
+ *              liboqs's ML-KEM-768 (OQS_KEM_encaps / OQS_KEM_decaps).
+ * ===========================================================================*/
+
+/* Generate a local KEX keypair for the given mode (X25519 / RSA-3072 / ML-KEM-768). */
+int kex_keygen(crypto_mode_t mode, dynbuf_t *priv_out, dynbuf_t *pub_out);
+
+/* Initiator side: given the peer's KEX public key, produce a ciphertext to
+ * send back and the shared secret derived locally. */
+int kex_encapsulate(crypto_mode_t mode, const dynbuf_t *peer_pub,
+                     dynbuf_t *ct_out, dynbuf_t *shared_secret_out);
+
+/* Responder side: given our own KEX private key and the peer's ciphertext,
+ * recover the same shared secret. */
+int kex_decapsulate(crypto_mode_t mode, const dynbuf_t *my_priv,
+                     const dynbuf_t *ct, dynbuf_t *shared_secret_out);
+
+/* ============================ agile signature wrappers ====================
+ *   MODE_ECC : ECDSA P-256 / SHA-256 (EVP_PKEY_EC, EVP_DigestSign/Verify)
+ *   MODE_RSA : RSA-3072 / RSA-PSS / SHA-256 (EVP_PKEY_RSA)
+ *   MODE_PQC : ML-DSA-65 (liboqs OQS_SIG_sign / OQS_SIG_verify)
+ * ===========================================================================*/
+
+/* Generate a local signing keypair for the given mode. */
+int sig_keygen(crypto_mode_t mode, dynbuf_t *priv_out, dynbuf_t *pub_out);
+
+/* Sign `msg` with our private key, producing a mode-appropriate signature. */
+int sig_sign(crypto_mode_t mode, const dynbuf_t *priv,
+             const uint8_t *msg, size_t msglen, dynbuf_t *sig_out);
+
+/* Verify `sig` over `msg` against a peer's public key. Returns 0 if valid,
+ * -1 otherwise (never partial success). */
+int sig_verify(crypto_mode_t mode, const dynbuf_t *pub,
+               const uint8_t *msg, size_t msglen,
+               const uint8_t *sig, size_t siglen);
+
 /* ============================ connection state =========================== */
 typedef struct {
     int fd;                       /* connected TCP socket                    */
@@ -165,4 +246,22 @@ void ks_derive_application(tls_conn *c);
 void die(const char *msg);
 void hexdump(const char *label, const uint8_t *p, size_t n);
 
+
+
+
+
+// ========================================================================
+// Post-Quantum & Classical Crypto Dispatch Layer (NT219 Track D)
+// ========================================================================
+
+void crypto_get_group_sizes(int group, size_t *pub_len, size_t *priv_len, size_t *secret_len);
+const char *crypto_get_group_name(int group);
+int crypto_keygen(int group, uint8_t *priv, uint8_t *pub);
+int crypto_derive(int group, const uint8_t *priv, const uint8_t *client_pub,
+                   size_t client_pub_len, uint8_t *shared_secret);
+size_t crypto_get_sig_max_len(int sig_algo, void *key);   /* was EVP_PKEY *key */
+int crypto_sign(int sig_algo, void *key, const uint8_t *content, size_t clen,
+                 uint8_t *sig, size_t *siglen);            /* was EVP_PKEY *key */
+EVP_PKEY *crypto_der_to_priv_pkey(const dynbuf_t *der);
+void crypto_get_last_rsa_lengths(size_t *pub_len, size_t *priv_len);
 #endif /* TLS13_H */

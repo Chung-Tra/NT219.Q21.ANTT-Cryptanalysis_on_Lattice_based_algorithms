@@ -1,0 +1,4 @@
+algo,op,iter,wall_ns,cycles
+ML-DSA-65,keygen,0,705585,1895678
+ML-DSA-65,sign,0,877665,2358442
+ML-DSA-65,verify,0,233794,628258

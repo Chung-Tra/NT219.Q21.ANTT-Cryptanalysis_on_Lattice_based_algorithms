@@ -20,6 +20,7 @@ source "$_SETENV_DIR/versions.env"
 
 export PATH="$OSSL_PREFIX/bin:$PATH"
 export LD_LIBRARY_PATH="$OSSL_PREFIX/lib:$OSSL_PREFIX/lib64:${LD_LIBRARY_PATH:-}"
+export OPENSSL_CONF="/home/maccriagor/pqc/openssl/ssl/openssl.cnf"
 
 echo "Activated OpenSSL from: $OSSL_PREFIX"
 "$OSSL_PREFIX/bin/openssl" version 2>/dev/null \

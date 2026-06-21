@@ -2,18 +2,67 @@
  * tls13.c  --  shared TLS 1.3 mechanics for client.c / server.c
  * Protocol hand-rolled; primitives via OpenSSL libcrypto (see tls13.h header).
  * ===========================================================================*/
+
+
+#define HASH_LEN 48
+#define KEY_LEN  32  
+#define IV_LEN   12
+#define TAG_LEN  16
+
+
+#define LEGACY_VERSION    0x0303
+
+
+
+
+
+
+
+// TLS 1.3 Protocol Version & Chosen Cipher Suite
+#define TLS13_VERSION             0x0304
+#define TLS_AES_256_GCM_SHA384    0x1302
+
+
+// TLS 1.3 SignatureScheme codepoint (RFC 8446)
+#define SIG_ECDSA_SECP256R1_SHA256   0x0403
+// Remaining TLS 1.3 Handshake Types
+
+
+
 #include "tls13.h"
+
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+
 
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
+#include <openssl/err.h>
 #include <openssl/core_names.h>
+#include <openssl/rsa.h>
+#include <openssl/ec.h>
+#include <openssl/obj_mac.h>
+#include <openssl/rand.h>
+#include <openssl/x509.h>   /* i2d_PUBKEY / d2i_PUBKEY (SubjectPublicKeyInfo DER) */
+
+#include <oqs/oqs.h>     /* liboqs: ML-KEM-768 (KEX) + ML-DSA-65 (signatures) */
+
+// Cryptographic signing helper signatures
+size_t crypto_get_sig_max_len(int sig_algo, void *key);
+int crypto_sign(int sig_algo, void *key, const uint8_t *content, size_t clen, uint8_t *sig, size_t *siglen);
+
+// Benchmarking & Key Exchange Abstraction Layer Protochemicals
+void crypto_get_group_sizes(int group, size_t *pub_len, size_t *priv_len, size_t *secret_len);
+int crypto_keygen(int group, uint8_t *priv, uint8_t *pub);
+int crypto_derive(int group, const uint8_t *priv, const uint8_t *client_pub, size_t client_pub_len, uint8_t *shared_secret);
+const char *crypto_get_group_name(int group);
 
 /* ============================== misc ===================================== */
 void die(const char *msg)
@@ -30,6 +79,15 @@ void hexdump(const char *label, const uint8_t *p, size_t n)
     if (n > show) printf("...");
     printf("\n");
 }
+
+
+
+
+
+
+
+
+
 
 /* ========================= growable byte buffer ========================== */
 void buf_init(buf_t *b) { b->data = NULL; b->len = 0; b->cap = 0; }
@@ -225,6 +283,399 @@ int aead_open(const uint8_t key[KEY_LEN], const uint8_t base_iv[IV_LEN],
     return ok ? 0 : -1;
 }
 
+/* ============================ algorithm-agility layer =====================
+ * See tls13.h for the rationale. Below: small shared helpers first, then the
+ * six public wrappers (kex_keygen/encapsulate/decapsulate, sig_keygen/sign/verify).
+ * ===========================================================================*/
+void dynbuf_free(dynbuf_t *b)
+{
+    if (!b) return;
+    free(b->data);
+    b->data = NULL;
+    b->len  = 0;
+}
+
+static void dynbuf_alloc(dynbuf_t *b, size_t n)
+{
+    b->data = malloc(n ? n : 1);
+    if (!b->data) die("malloc");
+    b->len = n;
+}
+
+const char *crypto_mode_name(crypto_mode_t mode)
+{
+    switch (mode) {
+        case MODE_ECC: return "X25519";
+        case MODE_RSA: return "RSA-3072-OAEP";
+        case MODE_PQC: return "ML-KEM-512";
+        default:       return "unknown";
+    }
+}
+
+const char *sig_mode_name(crypto_mode_t mode)
+{
+    switch (mode) {
+        case MODE_ECC: return "ECDSA-P256-SHA256";
+        case MODE_RSA: return "RSA-3072-PSS-SHA256";
+        case MODE_PQC: return "ML-DSA-44";
+        default:       return "unknown";
+    }
+}
+
+/* ---- EVP_PKEY <-> DER helpers (shared by RSA KEX/SIG and ECDSA SIG) -----
+ * i2d_* is handed a NULL output pointer so OpenSSL allocates the exact
+ * number of bytes the encoding needs; we just copy that into a dynbuf_t.   */
+static int evp_pkey_to_der(EVP_PKEY *pkey, dynbuf_t *priv_out, dynbuf_t *pub_out)
+{
+    unsigned char *p = NULL;
+    int plen = i2d_PrivateKey(pkey, &p);
+    if (plen <= 0) return -1;
+    dynbuf_alloc(priv_out, (size_t)plen);
+    memcpy(priv_out->data, p, (size_t)plen);
+    OPENSSL_free(p);
+
+    unsigned char *q = NULL;
+    int qlen = i2d_PUBKEY(pkey, &q);
+    if (qlen <= 0) { dynbuf_free(priv_out); return -1; }
+    dynbuf_alloc(pub_out, (size_t)qlen);
+    memcpy(pub_out->data, q, (size_t)qlen);
+    OPENSSL_free(q);
+    return 0;
+}
+
+static EVP_PKEY *der_to_priv_pkey(const dynbuf_t *priv)
+{
+    const unsigned char *p = priv->data;
+    return d2i_AutoPrivateKey(NULL, &p, (long)priv->len);
+}
+
+static EVP_PKEY *der_to_pub_pkey(const dynbuf_t *pub)
+{
+    const unsigned char *p = pub->data;
+    return d2i_PUBKEY(NULL, &p, (long)pub->len);
+}
+
+/* ---- RSA-3072 / ECDSA P-256 keygen (OpenSSL 3.x EVP_PKEY_CTX API) -------- */
+static EVP_PKEY *rsa_generate(int bits)
+{
+    EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    EVP_PKEY *pkey = NULL;
+    if (!pctx || EVP_PKEY_keygen_init(pctx) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, bits) <= 0 ||
+        EVP_PKEY_keygen(pctx, &pkey) <= 0)
+        pkey = NULL;
+    EVP_PKEY_CTX_free(pctx);
+    return pkey;
+}
+
+static EVP_PKEY *ec_p256_generate(void)
+{
+    EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+    EVP_PKEY *pkey = NULL;
+    if (!pctx || EVP_PKEY_keygen_init(pctx) <= 0 ||
+        EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, NID_X9_62_prime256v1) <= 0 ||
+        EVP_PKEY_keygen(pctx, &pkey) <= 0)
+        pkey = NULL;
+    EVP_PKEY_CTX_free(pctx);
+    return pkey;
+}
+
+/* ---- generic KEX wrappers (RFC 8446 KeyShare-style: keygen / encapsulate /
+ * decapsulate). MODE_ECC turns X25519 ECDH into a KEM shape by generating a
+ * fresh ephemeral keypair inside encapsulate() and shipping its public key
+ * as the "ciphertext" -- both sides then just run the same ECDH formula. */
+int kex_keygen(crypto_mode_t mode, dynbuf_t *priv_out, dynbuf_t *pub_out)
+{
+    switch (mode) {
+    case MODE_ECC: {
+        dynbuf_alloc(priv_out, 32);
+        dynbuf_alloc(pub_out, 32);
+        x25519_keygen(priv_out->data, pub_out->data);
+        return 0;
+    }
+    case MODE_RSA: {
+        EVP_PKEY *pkey = rsa_generate(RSA_KEX_MODULUS_BITS);
+        if (!pkey) return -1;
+        int rc = evp_pkey_to_der(pkey, priv_out, pub_out);
+        EVP_PKEY_free(pkey);
+        return rc;
+    }
+    case MODE_PQC: {
+        OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_512);
+        if (!kem) return -1;
+        dynbuf_alloc(priv_out, kem->length_secret_key);
+        dynbuf_alloc(pub_out,  kem->length_public_key);
+        OQS_STATUS rc = OQS_KEM_keypair(kem, pub_out->data, priv_out->data);
+        OQS_KEM_free(kem);
+        if (rc != OQS_SUCCESS) {
+            dynbuf_free(priv_out); dynbuf_free(pub_out); return -1;
+        }
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+int kex_encapsulate(crypto_mode_t mode, const dynbuf_t *peer_pub,
+                     dynbuf_t *ct_out, dynbuf_t *shared_secret_out)
+{
+    switch (mode) {
+    case MODE_ECC: {
+        if (peer_pub->len != 32) return -1;
+        uint8_t eph_priv[32], eph_pub[32];
+        x25519_keygen(eph_priv, eph_pub);
+        dynbuf_alloc(ct_out, 32);
+        memcpy(ct_out->data, eph_pub, 32);
+        dynbuf_alloc(shared_secret_out, 32);
+        if (!x25519_derive(eph_priv, peer_pub->data, shared_secret_out->data)) {
+            dynbuf_free(ct_out); dynbuf_free(shared_secret_out); return -1;
+        }
+        return 0;
+    }
+    case MODE_RSA: {
+        EVP_PKEY *pub = der_to_pub_pkey(peer_pub);
+        if (!pub) return -1;
+        uint8_t secret[RSA_SHARED_SECRET_LEN];
+        if (RAND_bytes(secret, sizeof secret) != 1) { EVP_PKEY_free(pub); return -1; }
+
+        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pub, NULL);
+        size_t ctlen = 0;
+        int ok = ctx &&
+                 EVP_PKEY_encrypt_init(ctx) > 0 &&
+                 EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) > 0 &&
+                 EVP_PKEY_CTX_set_rsa_oaep_md(ctx, EVP_sha256()) > 0 &&
+                 EVP_PKEY_encrypt(ctx, NULL, &ctlen, secret, sizeof secret) > 0;
+        if (ok) {
+            dynbuf_alloc(ct_out, ctlen);
+            ok = EVP_PKEY_encrypt(ctx, ct_out->data, &ctlen, secret, sizeof secret) > 0;
+            ct_out->len = ctlen;
+        }
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pub);
+        if (!ok) { dynbuf_free(ct_out); return -1; }
+
+        dynbuf_alloc(shared_secret_out, sizeof secret);
+        memcpy(shared_secret_out->data, secret, sizeof secret);
+        return 0;
+    }
+    case MODE_PQC: {
+        OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_512);
+        if (!kem) return -1;
+        if (peer_pub->len != kem->length_public_key) { OQS_KEM_free(kem); return -1; }
+        dynbuf_alloc(ct_out, kem->length_ciphertext);
+        dynbuf_alloc(shared_secret_out, kem->length_shared_secret);
+        OQS_STATUS rc = OQS_KEM_encaps(kem, ct_out->data, shared_secret_out->data,
+                                        peer_pub->data);
+        OQS_KEM_free(kem);
+        if (rc != OQS_SUCCESS) {
+            dynbuf_free(ct_out); dynbuf_free(shared_secret_out); return -1;
+        }
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+int kex_decapsulate(crypto_mode_t mode, const dynbuf_t *my_priv,
+                     const dynbuf_t *ct, dynbuf_t *shared_secret_out)
+{
+    switch (mode) {
+    case MODE_ECC: {
+        if (my_priv->len != 32 || ct->len != 32) return -1;
+        dynbuf_alloc(shared_secret_out, 32);
+        if (!x25519_derive(my_priv->data, ct->data, shared_secret_out->data)) {
+            dynbuf_free(shared_secret_out); return -1;
+        }
+        return 0;
+    }
+    case MODE_RSA: {
+        EVP_PKEY *priv = der_to_priv_pkey(my_priv);
+        if (!priv) return -1;
+        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(priv, NULL);
+        size_t outlen = 0;
+        int ok = ctx &&
+                 EVP_PKEY_decrypt_init(ctx) > 0 &&
+                 EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) > 0 &&
+                 EVP_PKEY_CTX_set_rsa_oaep_md(ctx, EVP_sha256()) > 0 &&
+                 EVP_PKEY_decrypt(ctx, NULL, &outlen, ct->data, ct->len) > 0;
+        if (ok) {
+            dynbuf_alloc(shared_secret_out, outlen);
+            ok = EVP_PKEY_decrypt(ctx, shared_secret_out->data, &outlen,
+                                   ct->data, ct->len) > 0;
+            shared_secret_out->len = outlen;
+        }
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(priv);
+        if (!ok) { dynbuf_free(shared_secret_out); return -1; }
+        return 0;
+    }
+    case MODE_PQC: {
+        OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_512);
+        if (!kem) return -1;
+        if (my_priv->len != kem->length_secret_key ||
+            ct->len != kem->length_ciphertext) { OQS_KEM_free(kem); return -1; }
+        dynbuf_alloc(shared_secret_out, kem->length_shared_secret);
+        OQS_STATUS rc = OQS_KEM_decaps(kem, shared_secret_out->data,
+                                        ct->data, my_priv->data);
+        OQS_KEM_free(kem);
+        if (rc != OQS_SUCCESS) { dynbuf_free(shared_secret_out); return -1; }
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+/* ---- generic signature wrappers ------------------------------------------
+ * MODE_RSA signs with RSA-PSS (not plain PKCS#1v1.5) for a fair comparison
+ * against the probabilistic ECDSA/ML-DSA schemes; digest is SHA-256 for both
+ * EVP-backed modes, independent of the SHA-384 used in the TLS key schedule.*/
+static int evp_sign(EVP_PKEY *priv, int use_pss, const uint8_t *msg, size_t msglen,
+                     dynbuf_t *sig_out)
+{
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return -1;
+    int ok = 0;
+    EVP_PKEY_CTX *pctx = NULL;
+    if (EVP_DigestSignInit(mdctx, &pctx, EVP_sha256(), NULL, priv) > 0 &&
+        (!use_pss ||
+         (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) > 0 &&
+          EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) > 0))) {
+        size_t siglen = 0;
+        if (EVP_DigestSign(mdctx, NULL, &siglen, msg, msglen) > 0) {
+            dynbuf_alloc(sig_out, siglen);
+            if (EVP_DigestSign(mdctx, sig_out->data, &siglen, msg, msglen) > 0) {
+                sig_out->len = siglen;
+                ok = 1;
+            }
+        }
+    }
+    EVP_MD_CTX_free(mdctx);
+    if (!ok) dynbuf_free(sig_out);
+    return ok ? 0 : -1;
+}
+
+static int evp_verify(EVP_PKEY *pub, int use_pss, const uint8_t *msg, size_t msglen,
+                       const uint8_t *sig, size_t siglen)
+{
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return -1;
+    int ok = 0;
+    EVP_PKEY_CTX *pctx = NULL;
+    if (EVP_DigestVerifyInit(mdctx, &pctx, EVP_sha256(), NULL, pub) > 0 &&
+        (!use_pss ||
+         (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) > 0 &&
+          EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) > 0))) {
+        ok = EVP_DigestVerify(mdctx, sig, siglen, msg, msglen) == 1;
+    }
+    EVP_MD_CTX_free(mdctx);
+    return ok ? 0 : -1;
+}
+
+int sig_keygen(crypto_mode_t mode, dynbuf_t *priv_out, dynbuf_t *pub_out)
+{
+    switch (mode) {
+    case MODE_ECC: {
+        EVP_PKEY *pkey = ec_p256_generate();
+        if (!pkey) return -1;
+        int rc = evp_pkey_to_der(pkey, priv_out, pub_out);
+        EVP_PKEY_free(pkey);
+        return rc;
+    }
+    case MODE_RSA: {
+        EVP_PKEY *pkey = rsa_generate(RSA_SIG_MODULUS_BITS);
+        if (!pkey) return -1;
+        int rc = evp_pkey_to_der(pkey, priv_out, pub_out);
+        EVP_PKEY_free(pkey);
+        return rc;
+    }
+    case MODE_PQC: {
+        OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_ml_dsa_44);
+        if (!sig) return -1;
+        dynbuf_alloc(priv_out, sig->length_secret_key);
+        dynbuf_alloc(pub_out,  sig->length_public_key);
+        OQS_STATUS rc = OQS_SIG_keypair(sig, pub_out->data, priv_out->data);
+        OQS_SIG_free(sig);
+        if (rc != OQS_SUCCESS) {
+            dynbuf_free(priv_out); dynbuf_free(pub_out); return -1;
+        }
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+int sig_sign(crypto_mode_t mode, const dynbuf_t *priv,
+             const uint8_t *msg, size_t msglen, dynbuf_t *sig_out)
+{
+    switch (mode) {
+    case MODE_ECC: {
+        EVP_PKEY *pkey = der_to_priv_pkey(priv);
+        if (!pkey) return -1;
+        int rc = evp_sign(pkey, 0, msg, msglen, sig_out);
+        EVP_PKEY_free(pkey);
+        return rc;
+    }
+    case MODE_RSA: {
+        EVP_PKEY *pkey = der_to_priv_pkey(priv);
+        if (!pkey) return -1;
+        int rc = evp_sign(pkey, 1, msg, msglen, sig_out);
+        EVP_PKEY_free(pkey);
+        return rc;
+    }
+    case MODE_PQC: {
+        OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_ml_dsa_44);
+        if (!sig) return -1;
+        if (priv->len != sig->length_secret_key) { OQS_SIG_free(sig); return -1; }
+        dynbuf_alloc(sig_out, sig->length_signature);
+        size_t siglen = sig_out->len;
+        OQS_STATUS rc = OQS_SIG_sign(sig, sig_out->data, &siglen, msg, msglen,
+                                      priv->data);
+        OQS_SIG_free(sig);
+        if (rc != OQS_SUCCESS) { dynbuf_free(sig_out); return -1; }
+        sig_out->len = siglen;   /* some PQC schemes have variable-length sigs */
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+int sig_verify(crypto_mode_t mode, const dynbuf_t *pub,
+               const uint8_t *msg, size_t msglen,
+               const uint8_t *sig, size_t siglen)
+{
+    switch (mode) {
+    case MODE_ECC: {
+        EVP_PKEY *pkey = der_to_pub_pkey(pub);
+        if (!pkey) return -1;
+        int rc = evp_verify(pkey, 0, msg, msglen, sig, siglen);
+        EVP_PKEY_free(pkey);
+        return rc;
+    }
+    case MODE_RSA: {
+        EVP_PKEY *pkey = der_to_pub_pkey(pub);
+        if (!pkey) return -1;
+        int rc = evp_verify(pkey, 1, msg, msglen, sig, siglen);
+        EVP_PKEY_free(pkey);
+        return rc;
+    }
+    case MODE_PQC: {
+        OQS_SIG *s = OQS_SIG_new(OQS_SIG_alg_ml_dsa_44);
+        if (!s) return -1;
+        if (pub->len != s->length_public_key) { OQS_SIG_free(s); return -1; }
+        OQS_STATUS rc = OQS_SIG_verify(s, msg, msglen, sig, siglen, pub->data);
+        OQS_SIG_free(s);
+        return rc == OQS_SUCCESS ? 0 : -1;
+    }
+    default:
+        return -1;
+    }
+}
+
 /* ============================== record layer ============================= *
  * TLSPlaintext / TLSCiphertext, RFC 8446 section 5.                         */
 static int read_n(int fd, uint8_t *buf, size_t n)
@@ -351,3 +802,263 @@ void ks_derive_application(tls_conn *c)
     traffic_keys(c->c_ap_secret, c->c_ap_key, c->c_ap_iv);
     traffic_keys(c->s_ap_secret, c->s_ap_key, c->s_ap_iv);
 }
+
+// ========================================================================
+// Post-Quantum & Classical Crypto Dispatch Layer (NT219 Track D)
+// ========================================================================
+
+static size_t g_last_rsa_pub_len  = 0;
+static size_t g_last_rsa_priv_len = 0;
+ 
+void crypto_get_group_sizes(int group, size_t *pub_len, size_t *priv_len, size_t *secret_len) {
+    *pub_len = 0;
+    *priv_len = 0;
+    *secret_len = 0;
+ 
+    if (group == 0x001d) { // X25519
+        *pub_len = 32;
+        *priv_len = 32;
+        *secret_len = 32;
+    } else if (group == 0x7E01) { // RSA-3072 KEX (custom placeholder id)
+        /* Generous upper bounds for DER-encoded RSA-3072
+         * SubjectPublicKeyInfo (~420 B typical) and PrivateKeyInfo
+         * (~1700 B typical). Real lengths come from
+         * crypto_get_last_rsa_lengths() after crypto_keygen(). */
+        *pub_len = 600;
+        *priv_len = 2048;
+        *secret_len = RSA_SHARED_SECRET_LEN; /* 32, defined in tls13.h */
+    } else if (group == 0x0432) { // ML-KEM-512 (custom placeholder id;
+                                   // matches ~128-bit security of
+                                   // P-256/RSA-3072 -- see thread notes)
+        OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_512);
+        if (kem) {
+            *pub_len    = kem->length_public_key;
+            *priv_len   = kem->length_secret_key;
+            *secret_len = kem->length_shared_secret;
+            OQS_KEM_free(kem);
+        }
+    }
+}
+ 
+/* Call immediately after crypto_keygen() for group 0x7E01 to get the
+ * REAL pub/priv DER lengths (smaller than the upper-bound allocation
+ * sizes from crypto_get_group_sizes() above). */
+void crypto_get_last_rsa_lengths(size_t *pub_len, size_t *priv_len) {
+    *pub_len = g_last_rsa_pub_len;
+    *priv_len = g_last_rsa_priv_len;
+}
+ 
+const char *crypto_get_group_name(int group) {
+    if (group == 0x001d) return "X25519";
+    if (group == 0x0017) return "P-256";
+    if (group == 0x7E01) return "RSA-3072";
+    if (group == 0x0432) return "ML-KEM-512";
+    return "Unknown-Group";
+}
+ 
+int crypto_keygen(int group, uint8_t *priv, uint8_t *pub) {
+    switch (group) {
+        case 0x001d: { /* X25519 */
+            x25519_keygen(priv, pub);
+            return 1;
+        }
+        case 0x7E01: { /* RSA-3072 KEX */
+            EVP_PKEY *pkey = rsa_generate(RSA_KEX_MODULUS_BITS);
+            if (!pkey) return 0;
+ 
+            dynbuf_t priv_der, pub_der;
+            int rc = evp_pkey_to_der(pkey, &priv_der, &pub_der);
+            EVP_PKEY_free(pkey);
+            if (rc != 0) return 0;
+ 
+            /* Caller allocated the upper-bound buffers from
+             * crypto_get_group_sizes(); copy real DER into them and
+             * record real lengths for crypto_get_last_rsa_lengths(). */
+            memcpy(priv, priv_der.data, priv_der.len);
+            memcpy(pub, pub_der.data, pub_der.len);
+            g_last_rsa_priv_len = priv_der.len;
+            g_last_rsa_pub_len  = pub_der.len;
+            dynbuf_free(&priv_der);
+            dynbuf_free(&pub_der);
+            return 1;
+        }
+        case 0x0432: { /* ML-KEM-512 */
+            OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_512);
+            if (!kem) return 0;
+            OQS_STATUS rc = OQS_KEM_keypair(kem, pub, priv);
+            OQS_KEM_free(kem);
+            return rc == OQS_SUCCESS ? 1 : 0;
+        }
+        default:
+            return 0;   /* unrecognized group -> caller must treat as failure */
+    }
+}
+ 
+int crypto_derive(int group, const uint8_t *priv, const uint8_t *client_pub,
+                   size_t client_pub_len, uint8_t *shared_secret) {
+    switch (group) {
+        case 0x001d: { /* X25519 */
+            if (client_pub_len != 32) return 0;
+            return x25519_derive(priv, client_pub, shared_secret) == 1 ? 1 : 0;
+        }
+        case 0x7E01: { /* RSA-3072 KEX: client_pub is the client's RSA-OAEP
+                         * ciphertext (the "key_share" it sent back); priv
+                         * is our DER private key bytes, real length
+                         * g_last_rsa_priv_len (NOT the upper-bound alloc
+                         * size from crypto_get_group_sizes). */
+            dynbuf_t priv_der;
+            priv_der.data = (uint8_t *)priv;
+            priv_der.len  = g_last_rsa_priv_len;
+        
+ 
+            EVP_PKEY *pk = der_to_priv_pkey(&priv_der);
+            if (!pk) {
+                fprintf(stderr, "DEBUG crypto_derive: der_to_priv_pkey FAILED\n");
+                ERR_print_errors_fp(stderr);
+                return 0;
+            }
+         
+ 
+            EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pk, NULL);
+            size_t outlen = 0;
+            int ok = ctx &&
+                     EVP_PKEY_decrypt_init(ctx) > 0 &&
+                     EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) > 0 &&
+                     EVP_PKEY_CTX_set_rsa_oaep_md(ctx, EVP_sha256()) > 0 &&
+                     EVP_PKEY_decrypt(ctx, NULL, &outlen, client_pub, client_pub_len) > 0;
+            if (!ok) {
+                fprintf(stderr, "DEBUG crypto_derive: OAEP size-probe step FAILED\n");
+                ERR_print_errors_fp(stderr);
+            }
+            /* outlen here is an UPPER BOUND (the RSA modulus size, e.g. 384
+             * for RSA-3072) -- NOT the true OAEP-unwrapped plaintext length.
+             * OpenSSL can't report the real unwrapped length without
+             * actually performing the decrypt, so we must allocate a
+             * scratch buffer sized to this upper bound, decrypt into it,
+             * and THEN check the real returned length against what we
+             * expect (RSA_SHARED_SECRET_LEN, 32 bytes). */
+            if (ok) {
+                uint8_t *scratch = malloc(outlen);
+                if (!scratch) { ok = 0; }
+                else {
+                    size_t real_outlen = outlen;
+                    ok = EVP_PKEY_decrypt(ctx, scratch, &real_outlen,
+                                           client_pub, client_pub_len) > 0;
+                    if (!ok) {
+                        fprintf(stderr, "DEBUG crypto_derive: OAEP actual decrypt FAILED\n");
+                        ERR_print_errors_fp(stderr);
+                    } else if (real_outlen != RSA_SHARED_SECRET_LEN) {
+                        fprintf(stderr, "DEBUG crypto_derive: unwrapped secret wrong length, got %zu expected %d\n",
+                                real_outlen, RSA_SHARED_SECRET_LEN);
+                        ok = 0;
+                    } else {
+                        memcpy(shared_secret, scratch, RSA_SHARED_SECRET_LEN);
+                    }
+                    free(scratch);
+                }
+            }
+            EVP_PKEY_CTX_free(ctx);
+            EVP_PKEY_free(pk);
+            return ok ? 1 : 0;
+        }
+        case 0x0432: { /* ML-KEM-512: client_pub is the client's KEM
+                         * ciphertext (sent via the new HS_CLIENT_KEM_CT
+                         * message); priv is our ML-KEM-512 secret key. */
+            OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_512);
+            if (!kem) return 0;
+            if (client_pub_len != kem->length_ciphertext) { OQS_KEM_free(kem); return 0; }
+            OQS_STATUS rc = OQS_KEM_decaps(kem, shared_secret, client_pub, priv);
+            OQS_KEM_free(kem);
+            return rc == OQS_SUCCESS ? 1 : 0;
+        }
+        default:
+            return 0;
+    }
+}
+ 
+/* Public wrapper exposing DER-to-EVP_PKEY private-key conversion to other
+ * translation units (server.c needs this to materialize a usable EVP_PKEY*
+ * from kex_keygen()'s DER output for the RSA signing keypair; der_to_priv_pkey()
+ * itself may be static/internal to this file, so this thin wrapper avoids
+ * depending on that visibility). */
+EVP_PKEY *crypto_der_to_priv_pkey(const dynbuf_t *der) {
+    return der_to_priv_pkey(der);
+}
+ 
+size_t crypto_get_sig_max_len(int sig_algo, void *key) {
+    if (sig_algo == 0x0403) { /* SIG_ECDSA_SECP256R1_SHA256 */
+        return 72; /* Max DER encoded signature size for P-256 */
+    }
+    if (sig_algo == 0x0804) { /* RSA_PSS_RSAE_SHA256 */
+        /* RSA-PSS signature length == modulus size in bytes (3072/8=384) */
+        EVP_PKEY *pkey = (EVP_PKEY *)key;
+        return pkey ? (size_t)EVP_PKEY_get_size(pkey) : (RSA_SIG_MODULUS_BITS / 8);
+    }
+    if (sig_algo == 0x0B02) { /* ML-DSA-44 (custom placeholder id) */
+        OQS_SIG *s = OQS_SIG_new(OQS_SIG_alg_ml_dsa_44);
+     
+        if (!s) return 0;
+        size_t len = s->length_signature;
+       
+        OQS_SIG_free(s);
+        return len;
+    }
+    return 0;
+}
+ 
+int crypto_sign(int sig_algo, void *key, const uint8_t *content, size_t clen,
+                 uint8_t *sig, size_t *siglen) {
+    if (sig_algo == 0x0403) { /* ECDSA P-256 / SHA-256 */
+        EVP_PKEY *pkey = (EVP_PKEY *)key;
+        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+        if (!ctx) return 0;
+        int ok = 0;
+        if (EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, pkey) == 1 &&
+            EVP_DigestSign(ctx, sig, siglen, content, clen) == 1) {
+            ok = 1;
+        }
+        EVP_MD_CTX_free(ctx);
+        return ok;
+    }
+    if (sig_algo == 0x0804) { /* RSA-PSS / SHA-256, RFC 8446 sec 4.2.3 */
+        EVP_PKEY *pkey = (EVP_PKEY *)key;
+        EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+        if (!ctx) return 0;
+        int ok = 0;
+        EVP_PKEY_CTX *pctx = NULL;
+        if (EVP_DigestSignInit(ctx, &pctx, EVP_sha256(), NULL, pkey) == 1 &&
+            EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) > 0 &&
+            EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) > 0 &&
+            EVP_DigestSign(ctx, sig, siglen, content, clen) == 1) {
+            ok = 1;
+        }
+        EVP_MD_CTX_free(ctx);
+        return ok;
+    }
+    if (sig_algo == 0x0B02) { /* ML-DSA-44 -- key is a dynbuf_t* pointing
+                                 * at the raw liboqs secret-key bytes
+                                 * (see server.c's g_pqc_sign_priv), NOT
+                                 * an EVP_PKEY*. Delegates to the existing
+                                 * sig_sign() wrapper (already correctly
+                                 * implemented for MODE_PQC) rather than
+                                 * calling liboqs directly a second time. */
+        dynbuf_t *priv = (dynbuf_t *)key;
+        dynbuf_t sig_out;
+        if (sig_sign(MODE_PQC, priv, content, clen, &sig_out) != 0) return 0;
+        if (sig_out.len > *siglen) { dynbuf_free(&sig_out); return 0; } /* caller's buffer too small */
+        memcpy(sig, sig_out.data, sig_out.len);
+        *siglen = sig_out.len;
+        dynbuf_free(&sig_out);
+        return 1;
+    }
+    return 0;
+}
+
+
+ 
+
+ 
+
+ 
+
+

@@ -1,0 +1,13 @@
+file,text_bytes,total_bytes
+libml-kem-512_clean.a,19441,19441
+libml-kem-512_clean.a,19441,19441
+libml-kem-768_clean.a,19611,19611
+libml-kem-768_clean.a,19611,19611
+libml-kem-1024_clean.a,19174,19174
+libml-kem-1024_clean.a,19174,19174
+libml-dsa-44_clean.a,25771,25771
+libml-dsa-44_clean.a,25771,25771
+libml-dsa-65_clean.a,24769,24769
+libml-dsa-65_clean.a,24769,24769
+libml-dsa-87_clean.a,22201,22201
+libml-dsa-87_clean.a,22201,22201

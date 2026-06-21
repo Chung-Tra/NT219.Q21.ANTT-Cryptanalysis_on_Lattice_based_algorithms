@@ -1,0 +1,4 @@
+algo,op,iter,wall_ns,cycles
+ML-KEM-768,keygen,0,129126,346308
+ML-KEM-768,encap,0,63666,170738
+ML-KEM-768,decap,0,90860,243762

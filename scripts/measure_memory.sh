@@ -28,7 +28,7 @@ mkdir -p "$ROOT/data"
 
 # 15-algo matrix, identical to run_micro.sh (brief 7.1) so the WP5 RSS table
 # lines up 1:1 with the WP2 latency table (no rsa-2048; adds rsa-7680/15360 + p521).
-ALGOS=( "rsa 3072" "rsa 7680" "rsa 15360"
+ALGOS=( "rsa 3072" "rsa 7680" 
         "ecdsa p256" "ecdsa p384" "ecdsa p521"
         "ecdh p256" "ecdh p384" "ecdh p521"
         "mlkem 512" "mlkem 768" "mlkem 1024"
